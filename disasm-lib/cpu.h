@@ -4,10 +4,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#pragma pack(push,1)
 
 #include <windows.h>
 #include "misc.h"
+
+#pragma pack(push,1)
 
 ////////////////////////////////////////////////////////
 // System descriptors
