@@ -17,6 +17,7 @@
         "rhs": "Windows"
       },
       "cacheVariables": {
+        "BUILD_TESTING": true,
         "MHOOK_BUILD_EXAMPLES": true,
         "MHOOK_ENABLE_SANITY_CHECKS": true
       }
@@ -39,6 +40,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
+        "BUILD_TESTING": true,
         "MHOOK_BUILD_EXAMPLES": true,
         "MHOOK_ENABLE_SANITY_CHECKS": true
       }
@@ -196,6 +198,92 @@
     {
       "name": "mingw-x64-release",
       "configurePreset": "mingw-x64-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "msvc-x86-debug",
+      "configurePreset": "msvc-x86",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "mingw-x86-debug",
+      "configurePreset": "mingw-x86-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "msvc-x86-release",
+      "configurePreset": "msvc-x86",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "mingw-x86-release",
+      "configurePreset": "mingw-x86-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "msvc-x64-debug",
+      "configurePreset": "msvc-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "mingw-x64-debug",
+      "configurePreset": "mingw-x64-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "msvc-x64-release",
+      "configurePreset": "msvc-x64",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "mingw-x64-release",
+      "configurePreset": "mingw-x64-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     }
   ]
 }
