@@ -1,5 +1,8 @@
 // Copyright (C) 2002, Matt Conover (mconover@gmail.com)
 #include "misc.h"
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 
 BOOL IsHexChar(BYTE ch)
 {

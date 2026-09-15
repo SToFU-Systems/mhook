@@ -18,7 +18,16 @@
 //FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
 //IN THE SOFTWARE.
 
-#include "stdafx.h"
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0501
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "mhook-lib/mhook.h"
 
 //=========================================================================

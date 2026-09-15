@@ -26,6 +26,35 @@ Licensed under the [MIT License](LICENSE).
 
 ## Build
 
+### Requirements
+
+- Windows, targeting x86 or x64.
+- CMake 3.24 or newer, available on `PATH`.
+- For MSVC builds: Visual Studio 2022 or Build Tools 2022 with C++ tools and a Windows SDK.
+
+### Configure and build
+
+Run these commands from the repository root:
+
+```powershell
+cmake --preset msvc-[x86/x64]
+cmake --build --preset msvc-[x86/x64]-[debug/release]
+```
+
+### Run tests
+
+```powershell
+ctest --preset msvc-[x86/x64]-[debug/release]
+```
+
+### MinGW (WIP)
+
+```powershell
+cmake --preset mingw-[x86/x64]-[debug/release]
+cmake --build --preset mingw-[x86/x64]-[debug/release]
+ctest --preset mingw-[x86/x64]-[debug/release]
+```
+
 ## Version History
 
 | Version | Date | Highlights |
