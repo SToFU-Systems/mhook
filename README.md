@@ -1,25 +1,36 @@
-# Mhook
+# mhook
 
-A Windows inline-hooking library for x86 and x64.
+A Windows API hooking library.
 
-## Build
+## Table of Contents
 
-Use CMake 3.24 or newer and Visual Studio 2022 with C++ tools and a Windows SDK:
+- [Overview](#overview)
+- [License](#license)
+- [Usage](#usage)
+- [Build](#build)
+- [Version History](#version-history)
 
-```powershell
-cmake --preset msvc-[x64/x86]
-cmake --build --preset msvc-[x64/x86]-[debug/release]
-ctest --preset msvc-[x64/x86]-[debug/release]
-```
+## Overview
 
-Alternatively use build script:
+The [Mhook](https://github.com/martona/mhook) library was created by [Marton Anka](https://github.com/martona) for inline function hooking in Windows x86 and x64 applications. It redirects calls to a replacement function while preserving access to the original function. Hooks can be installed and removed at runtime. Mhook additionally includes Matt Conover's disassembler. The latest original release version is [v2.4](https://github.com/martona/mhook/tree/v2.4). The [last commit](https://github.com/martona/mhook/commit/e58a58ca31dbe14f202b9b26315bff9f7a32598c) was made on March 6, 2014.
 
-```powershell
-python build.py
-```
+**SToFU Systems** now maintains and develops this fork.
 
-Choose a preset or **All presets**, then **Build**, **Rebuild**, or **Clean**.
+Our site: [https://stofu.io](https://stofu.io)
 
 ## License
 
-See [COPYING](COPYING). Existing source notices remain applicable.
+Licensed under the [MIT License](LICENSE).
+
+## Usage
+
+## Build
+
+## Version History
+
+| Version | Date | Highlights |
+| --- | --- | --- |
+| |  |  |
+| [Original 2.4](https://github.com/martona/mhook/tree/v2.4) | 2014-03-05 | Last original release. |
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
