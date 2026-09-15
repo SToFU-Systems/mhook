@@ -1,0 +1,55 @@
+name: CMake build and test
+
+on:
+    push:
+        branches: [development, master]
+    pull_request:
+        branches: [development, master]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: MSVC ${{ matrix.architecture }} ${{ matrix.configuration }}
+        runs-on: windows-2022
+        timeout-minutes: 15
+
+        strategy:
+            fail-fast: false
+            matrix:
+                architecture: [x86, x64]
+                configuration: [debug, release]
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+
+            - name: Configure
+              run: |
+                  cmake --preset msvc-${{ matrix.architecture }} 2>&1 | Tee-Object -FilePath configure.log
+                  exit $LASTEXITCODE
+
+            - name: Build
+              run: |
+                  cmake --build --preset msvc-${{ matrix.architecture }}-${{ matrix.configuration }} --parallel 2>&1 | Tee-Object -FilePath build.log
+                  exit $LASTEXITCODE
+
+            - name: Test
+              run: |
+                  ctest --preset msvc-${{ matrix.architecture }}-${{ matrix.configuration }} 2>&1 | Tee-Object -FilePath test.log
+                  exit $LASTEXITCODE
+
+            - name: Upload failure logs
+              if: failure()
+              uses: actions/upload-artifact@v7
+              with:
+                  name: logs-msvc-${{ matrix.architecture }}-${{ matrix.configuration }}
+                  path: |
+                      configure.log
+                      build.log
+                      test.log
+                      build/msvc-${{ matrix.architecture }}/CMakeCache.txt
+                      build/msvc-${{ matrix.architecture }}/CMakeFiles/CMakeConfigureLog.yaml
+                      build/msvc-${{ matrix.architecture }}/Testing/Temporary/
