@@ -14,3 +14,17 @@ foreach(language IN ITEMS c cpp)
     add_test(NAME mhook.header.${language} COMMAND mhook-header-${language}-test)
     set_tests_properties(mhook.header.${language} PROPERTIES TIMEOUT 15)
 endforeach()
+
+add_executable(mhook-hook-test hook-test.cpp)
+target_link_libraries(mhook-hook-test PRIVATE mhook::mhook)
+mhook_configure_private_target(mhook-hook-test)
+
+foreach(case IN ITEMS basic trampoline restore passthrough thunk short_func threads reuse sweep)
+    add_test(NAME mhook.hook.${case} COMMAND mhook-hook-test ${case})
+endforeach()
+
+set_tests_properties(
+    mhook.hook.basic mhook.hook.trampoline mhook.hook.restore
+    mhook.hook.passthrough mhook.hook.thunk mhook.hook.short_func
+    PROPERTIES TIMEOUT 15)
+set_tests_properties(mhook.hook.threads mhook.hook.reuse mhook.hook.sweep PROPERTIES TIMEOUT 300)
