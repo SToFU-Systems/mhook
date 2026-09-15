@@ -1,3 +1,12 @@
+//================================================================================
+// Mhook
+//
+// Copyright (c) 2026, SToFU Systems (https://stofu.io). All rights reserved.
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 #include "mhook-lib/mhook.h"
 #include "mhook-lib/mhook.h"
 

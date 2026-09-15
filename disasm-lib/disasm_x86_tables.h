@@ -1,3 +1,11 @@
+//================================================================================
+// Mhook
+// Maintained by SToFU Systems (https://stofu.io).
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 // Copyright (C) 2004, Matt Conover (mconover@gmail.com)
 //
 // The opcode tables in this file are based off the Intel Instruction Set Reference

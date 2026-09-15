@@ -1,3 +1,13 @@
+//================================================================================
+// Mhook
+//
+// Modifications and original additions:
+// Copyright (c) 2026, SToFU Systems (https://stofu.io). All rights reserved.
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 //Copyright (c) 2007-2008, Marton Anka
 //
 //Permission is hereby granted, free of charge, to any person obtaining a 

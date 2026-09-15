@@ -1,4 +1,13 @@
+//================================================================================
+// Mhook
+// Maintained by SToFU Systems (https://stofu.io).
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 // Copyright (C) 2003, Matt Conover (mconover@gmail.com)
+
 #ifndef CPU_H
 #define CPU_H
 #ifdef __cplusplus

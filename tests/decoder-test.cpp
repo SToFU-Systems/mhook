@@ -1,3 +1,13 @@
+//================================================================================
+// Mhook
+//
+// Modifications and original additions:
+// Copyright (c) 2026, SToFU Systems (https://stofu.io). All rights reserved.
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 #include <windows.h>
 #include <stdio.h>
 #include "mhook-lib/mhook.h"
@@ -47,4 +57,3 @@ int main()
     puts("Archive linkage and x86/x64 decoder checks passed.");
     return 0;
 }
-

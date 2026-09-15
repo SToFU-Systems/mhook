@@ -1,4 +1,13 @@
+//================================================================================
+// Mhook
+// Maintained by SToFU Systems (https://stofu.io).
+//
+// Licensed under the MIT License.
+// See LICENSE in the repository root for the full license text.
+//================================================================================
+
 // Copyright (C) 2002, Matt Conover (mconover@gmail.com)
+
 #ifndef MISC_H
 #define MISC_H
 #ifdef __cplusplus
