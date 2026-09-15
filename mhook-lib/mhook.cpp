@@ -25,6 +25,12 @@
 #include "mhook.h"
 #include "../disasm-lib/disasm.h"
 
+#ifdef _M_IX86
+#define _M_IX86_X64
+#elif defined _M_X64
+#define _M_IX86_X64
+#endif
+
 //=========================================================================
 #ifndef cntof
 #define cntof(a) (sizeof(a)/sizeof(a[0]))

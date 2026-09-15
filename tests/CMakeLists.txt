@@ -4,3 +4,13 @@ mhook_configure_private_target(mhook-decoder-test)
 add_test(NAME mhook.decoder COMMAND mhook-decoder-test)
 set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
 
+foreach(language IN ITEMS c cpp)
+    add_executable(mhook-header-${language}-test header-${language}-test.${language})
+    target_link_libraries(mhook-header-${language}-test PRIVATE mhook::mhook)
+    # Match the warning baseline without inheriting private build definitions.
+    if(MHOOK_COMPILER_MSVC)
+        target_compile_options(mhook-header-${language}-test PRIVATE /W3 /WX)
+    endif()
+    add_test(NAME mhook.header.${language} COMMAND mhook-header-${language}-test)
+    set_tests_properties(mhook.header.${language} PROPERTIES TIMEOUT 15)
+endforeach()

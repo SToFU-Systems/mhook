@@ -18,11 +18,18 @@
 //FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
 //IN THE SOFTWARE.
 
-#ifdef _M_IX86
-#define _M_IX86_X64
-#elif defined _M_X64
-#define _M_IX86_X64
-#endif
+#pragma once
+
+#include <windows.h>
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif //__cplusplus
 
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 BOOL Mhook_Unhook(PVOID *ppHookedFunction);
+
+#ifdef __cplusplus
+}
+#endif //__cplusplus
