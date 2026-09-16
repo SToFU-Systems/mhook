@@ -157,6 +157,8 @@ static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
 static DWORD g_nHooksInUse = 0;
 static HANDLE* g_hThreadHandles = NULL;
 static DWORD g_nThreadHandles = 0;
+static thread_local MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
+
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
 
@@ -779,6 +781,17 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 	}
 
 	return dwRet;
+}
+
+//================================================================================
+// Function: Mhook_GetLastStatus
+// Description: Returns the status produced by the calling thread's most recent
+//              Mhook_SetHook or Mhook_Unhook operation without changing the
+//              stored value.
+//================================================================================
+MHOOK_STATUS Mhook_GetLastStatus(void)
+{
+    return g_lastStatus;
 }
 
 //=========================================================================

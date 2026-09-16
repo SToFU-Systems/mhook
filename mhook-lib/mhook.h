@@ -37,8 +37,35 @@ extern "C"
 {
 #endif //__cplusplus
 
+//================================================================================
+// Enum: MHOOK_STATUS
+// Description: Identifies the final outcome of the calling thread's most
+//              recent Mhook operation. SUCCESS means the operation completed; 
+//              other statuses identify the terminal failure classes.
+//================================================================================
+typedef enum MHOOK_STATUS
+{
+    MHOOK_STATUS_SUCCESS = 0,
+    MHOOK_STATUS_INVALID_ARGUMENT = 1,
+    MHOOK_STATUS_DECODE_FAILED = 2,
+    MHOOK_STATUS_UNSUPPORTED_PROLOGUE = 3,
+    MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED = 4,
+    MHOOK_STATUS_MEMORY_PROTECTION_FAILED = 5,
+    MHOOK_STATUS_HOOK_NOT_FOUND = 6,
+    MHOOK_STATUS_THREAD_SUSPENSION_FAILED = 7,
+    MHOOK_STATUS_PATCH_FAILED = 8
+} MHOOK_STATUS;
+
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 BOOL Mhook_Unhook(PVOID *ppHookedFunction);
+
+//================================================================================
+// Function: Mhook_GetLastStatus
+// Description: Returns the status produced by the calling thread's most recent
+//              Mhook_SetHook or Mhook_Unhook operation without changing the
+//              stored value.
+//================================================================================
+MHOOK_STATUS Mhook_GetLastStatus(void);
 
 #ifdef __cplusplus
 }
