@@ -796,8 +796,16 @@ MHOOK_STATUS Mhook_GetLastStatus(void)
 
 //=========================================================================
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
+    if (!ppSystemFunction || !*ppSystemFunction || !pHookFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
 	MHOOKS_TRAMPOLINE* pTrampoline = NULL;
 	PVOID pSystemFunction = *ppSystemFunction;
+    MHOOK_STATUS operationStatus = MHOOK_STATUS_SUCCESS;
+
 	// ensure thread-safety
 	EnterCritSec();
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
@@ -878,12 +886,14 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 					FlushInstructionCache(GetCurrentProcess(), pTrampoline->codeTrampoline, dwInstructionLength);
 					VirtualProtect(pTrampoline, sizeof(MHOOKS_TRAMPOLINE), dwOldProtectTrampolineFunction, &dwOldProtectTrampolineFunction);
 				} else {
+                    operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 					ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 2: %d", gle()));
 				}
 				// flush instruction cache and restore original protection
 				FlushInstructionCache(GetCurrentProcess(), pSystemFunction, dwInstructionLength);
 				VirtualProtect(pSystemFunction, dwInstructionLength, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
 			} else {
+                operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 				ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 1: %d", gle()));
 			}
 			if (pTrampoline->pSystemFunction) {
@@ -896,6 +906,8 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 				TrampolineFree(pTrampoline, TRUE);
 				pTrampoline = NULL;
 			}
+		} else {
+            operationStatus = MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED;
 		}
 		// resume everybody else
 		ResumeOtherThreads();
@@ -903,13 +915,20 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 		ODPRINTF((L"mhooks: disassembly signals %d bytes (unacceptable)", dwInstructionLength));
 	}
 	LeaveCritSec();
-	return (pTrampoline != NULL);
+    g_lastStatus = operationStatus;
+    return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================
 BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
+    if (!ppHookedFunction || !*ppHookedFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
 	ODPRINTF((L"mhooks: Mhook_Unhook: %p", *ppHookedFunction));
-	BOOL bRet = FALSE;
+    MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
 	EnterCritSec();
 	// get the trampoline structure that corresponds to our function
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)*ppHookedFunction);
@@ -930,19 +949,21 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 			VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
 			// return the original function pointer
 			*ppHookedFunction = pTrampoline->pSystemFunction;
-			bRet = TRUE;
+            operationStatus = MHOOK_STATUS_SUCCESS;
 			ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
 			// free the trampoline while not really discarding it from memory
 			TrampolineFree(pTrampoline, FALSE);
 			ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
 		} else {
+            operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", gle()));
 		}
 		// make the other guys runnable
 		ResumeOtherThreads();
 	}
 	LeaveCritSec();
-	return bRet;
+    g_lastStatus = operationStatus;
+    return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================
