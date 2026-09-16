@@ -24,6 +24,21 @@ Licensed under the [MIT License](LICENSE).
 
 ## Usage
 
+`Mhook_SetHook` and `Mhook_Unhook` retain their Boolean results. Call `Mhook_GetLastStatus` immediately after either operation when a detailed result is needed. The status belongs to the calling thread and is replaced by its next hook or unhook operation.
+
+| Status | Meaning | Handling |
+| --- | --- | --- |
+| `MHOOK_STATUS_SUCCESS` | No reported failure. | Continue normally. |
+| `MHOOK_STATUS_INVALID_ARGUMENT` | A required argument or pointed-to address is null. | Correct the call before retrying. |
+| `MHOOK_STATUS_DECODE_FAILED` | The target prologue could not be decoded. | Skip the target or use another hooking method. |
+| `MHOOK_STATUS_UNSUPPORTED_PROLOGUE` | The decoded prologue cannot hold a supported patch. | Skip the target or use another hooking method. |
+| `MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED` | No suitable trampoline could be allocated. | Retry only if memory availability may have changed. |
+| `MHOOK_STATUS_MEMORY_PROTECTION_FAILED` | A required memory-protection change failed. | Stop the operation and retry only if process conditions may have changed. |
+| `MHOOK_STATUS_HOOK_NOT_FOUND` | The supplied pointer does not identify an active hook. | Correct the hook lifecycle or pointer before retrying. |
+| `MHOOK_STATUS_THREAD_SUSPENSION_FAILED` | Required thread coordination failed. | Stop changing hooks and retry only if thread conditions may have changed. |
+| `MHOOK_STATUS_PATCH_FAILED` | Publishing modified code failed. | Treat the hook state as uncertain and stop further hook changes. |
+| `MHOOK_STATUS_TARGET_MODIFIED` | Another writer modified the target after the hook was installed. | Leave the hook installed and retry only after Mhook's patch has been restored. |
+
 ## Build
 
 ### Requirements

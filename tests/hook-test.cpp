@@ -177,6 +177,8 @@ static int CaseConflict(void)
         return Fail("Mhook_Unhook restored a target somebody else had patched");
     if (GetLastError() != MHOOK_ERROR_TARGET_MODIFIED)
         return Fail("Mhook_Unhook did not report the conflict through GetLastError");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_TARGET_MODIFIED)
+        return Fail("Mhook_Unhook reported the wrong status for a modified target");
     if (trampoline != before)
         return Fail("the refused Mhook_Unhook still overwrote the pointer");
     if (memcmp(target, patched, TARGET_BUFFER_SIZE) != 0)
@@ -307,6 +309,8 @@ static int CaseShortFunc(void)
     PVOID trampoline = target;
     if (Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
         return Fail("Mhook_SetHook accepted a function shorter than MHOOK_JMPSIZE");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+        return Fail("Mhook_SetHook reported the wrong status for a short prologue");
     if (trampoline != (PVOID)target)
         return Fail("the failed Mhook_SetHook still overwrote the pointer");
     if (memcmp(target, snapshot, TARGET_BUFFER_SIZE) != 0)

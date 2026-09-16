@@ -161,6 +161,8 @@ static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
 static DWORD g_nHooksInUse = 0;
 static HANDLE* g_hThreadHandles = NULL;
 static DWORD g_nThreadHandles = 0;
+static thread_local MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
+
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
 
@@ -677,8 +679,10 @@ static void FixupIPRelativeAddressing(PBYTE pbNew, PBYTE pbOriginal, MHOOKS_PATC
 // at which point disassembly must stop.
 // Finally, detect and collect information on IP-relative instructions
 // that we can patch.
-static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDATA* pdata) {
-	DWORD dwRet = 0;
+static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDATA* pdata, MHOOK_STATUS* pStatus)
+{
+    DWORD dwRet = 0;
+    *pStatus = MHOOK_STATUS_DECODE_FAILED;
 	pdata->nLimitDown = 0;
 	pdata->nLimitUp = 0;
 	pdata->nRipCnt = 0;
@@ -779,16 +783,34 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 			pLoc  += pins->Length;
 		}
 
+		if (dwRet >= dwMinLen)
+            *pStatus = MHOOK_STATUS_SUCCESS;
+		else if (pins)
+            *pStatus = MHOOK_STATUS_UNSUPPORTED_PROLOGUE;
+
 		CloseDisassembler(&dis);
 	}
 
 	return dwRet;
 }
 
+MHOOK_STATUS Mhook_GetLastStatus(void)
+{
+    return g_lastStatus;
+}
+
 //=========================================================================
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
+    if (!ppSystemFunction || !*ppSystemFunction || !pHookFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
 	MHOOKS_TRAMPOLINE* pTrampoline = NULL;
 	PVOID pSystemFunction = *ppSystemFunction;
+    MHOOK_STATUS operationStatus = MHOOK_STATUS_SUCCESS;
+
 	// ensure thread-safety
 	EnterCritSec();
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
@@ -798,8 +820,9 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
 	// figure out the length of the overwrite zone
 	MHOOKS_PATCHDATA patchdata = {0};
-	DWORD dwInstructionLength = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata);
-	if (dwInstructionLength >= MHOOK_JMPSIZE) {
+
+	DWORD dwInstructionLength = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata, &operationStatus);
+	if (operationStatus == MHOOK_STATUS_SUCCESS) {
 		ODPRINTF((L"mhooks: Mhook_SetHook: disassembly signals %d bytes", dwInstructionLength));
 		// suspend every other thread in this process, and make sure their IP 
 		// is not in the code we're about to overwrite.
@@ -875,12 +898,14 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 					FlushInstructionCache(GetCurrentProcess(), pTrampoline->codeTrampoline, dwInstructionLength);
 					VirtualProtect(pTrampoline, sizeof(MHOOKS_TRAMPOLINE), dwOldProtectTrampolineFunction, &dwOldProtectTrampolineFunction);
 				} else {
+                    operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 					ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 2: %d", gle()));
 				}
 				// flush instruction cache and restore original protection
 				FlushInstructionCache(GetCurrentProcess(), pSystemFunction, dwInstructionLength);
 				VirtualProtect(pSystemFunction, dwInstructionLength, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
 			} else {
+                operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 				ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 1: %d", gle()));
 			}
 			if (pTrampoline->pSystemFunction) {
@@ -893,6 +918,8 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 				TrampolineFree(pTrampoline, TRUE);
 				pTrampoline = NULL;
 			}
+		} else {
+            operationStatus = MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED;
 		}
 		// resume everybody else
 		ResumeOtherThreads();
@@ -900,14 +927,23 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 		ODPRINTF((L"mhooks: disassembly signals %d bytes (unacceptable)", dwInstructionLength));
 	}
 	LeaveCritSec();
-	return (pTrampoline != NULL);
+    g_lastStatus = operationStatus;
+    return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================
 BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
+    if (!ppHookedFunction || !*ppHookedFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
 	ODPRINTF((L"mhooks: Mhook_Unhook: %p", *ppHookedFunction));
 	BOOL bRet = FALSE;
 	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
+	MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
+
 	EnterCritSec();
 	// get the trampoline structure that corresponds to our function
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)*ppHookedFunction);
@@ -927,6 +963,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 				pTrampoline->cbOverwrittenCode) != 0) {
 			ODPRINTF((L"mhooks: Mhook_Unhook: %p no longer holds our patch, refusing to restore",
 				pTrampoline->pSystemFunction));
+			operationStatus = MHOOK_STATUS_TARGET_MODIFIED;
 			dwError = MHOOK_ERROR_TARGET_MODIFIED;
 		}
 		// make memory writable
@@ -941,6 +978,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 			VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
 			// return the original function pointer
 			*ppHookedFunction = pTrampoline->pSystemFunction;
+            operationStatus = MHOOK_STATUS_SUCCESS;
 			bRet = TRUE;
 			ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
 			// free the trampoline while not really discarding it from memory
@@ -948,6 +986,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 			ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
 		} else {
 			// keep VirtualProtect's own reason, it is more useful than ours
+			operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 			dwError = gle();
 			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", dwError));
 		}
@@ -959,7 +998,9 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 	// overwrite the reason we are reporting
 	if (!bRet)
 		SetLastError(dwError);
-	return bRet;
+
+	g_lastStatus = operationStatus;
+	return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================

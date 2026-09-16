@@ -50,12 +50,54 @@ extern "C"
 #endif //__cplusplus
 
 /**
+ * @brief Identifies the detailed result of a hook operation.
+ *
+ * Mhook_SetHook() and Mhook_Unhook() store one of these values for the calling
+ * thread. The value describes the first detected internal failure unless a
+ * later failure determines that the operation itself cannot complete.
+ *
+ */
+typedef enum MHOOK_STATUS
+{
+    /** No monitored operation reported a failure. */
+    MHOOK_STATUS_SUCCESS = 0,
+
+    /** A required pointer or pointed-to address was NULL. */
+    MHOOK_STATUS_INVALID_ARGUMENT = 1,
+
+    /** The target prologue could not be decoded. */
+    MHOOK_STATUS_DECODE_FAILED = 2,
+
+    /** The decoded prologue cannot hold a supported patch. */
+    MHOOK_STATUS_UNSUPPORTED_PROLOGUE = 3,
+
+    /** No suitable trampoline could be allocated. */
+    MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED = 4,
+
+    /** A required memory-protection change failed. */
+    MHOOK_STATUS_MEMORY_PROTECTION_FAILED = 5,
+
+    /** The supplied trampoline does not identify an active hook. */
+    MHOOK_STATUS_HOOK_NOT_FOUND = 6,
+
+    /** Thread enumeration, inspection, or suspension failed. */
+    MHOOK_STATUS_THREAD_SUSPENSION_FAILED = 7,
+
+    /** An instruction-cache flush for modified code failed. */
+    MHOOK_STATUS_PATCH_FAILED = 8,
+
+    /** Another writer modified the target after the hook was installed. */
+    MHOOK_STATUS_TARGET_MODIFIED = 9
+} MHOOK_STATUS;
+
+
+/**
  * @name Error codes reported through GetLastError()
  * The values sit in the range Windows reserves for application defined codes.
  * @{
  */
 
-/** The pointer does not name a hook that is currently installed. */
+ /** The pointer does not name a hook that is currently installed. */
 #define MHOOK_ERROR_NOT_HOOKED      ((DWORD)((1UL << 29) | 1UL))
 
 /** Another writer has patched the target since. See Mhook_Unhook(). */
@@ -81,6 +123,7 @@ extern "C"
  */
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
+
 /**
  * @brief Removes a hook and restores the bytes it overwrote.
  *
@@ -104,6 +147,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
  */
 BOOL Mhook_Unhook(PVOID *ppHookedFunction);
 
+
 /**
  * @brief Reports which address an installed hook patched.
  *
@@ -117,6 +161,21 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction);
  *       the one handed to Mhook_SetHook().
  */
 PVOID Mhook_GetTarget(PVOID pHookedFunction);
+
+
+/**
+ * @brief Returns the detailed status of the calling thread's most recent hook
+ *        installation or removal.
+ *
+ * Each thread owns an independent status initialized to MHOOK_STATUS_SUCCESS.
+ * Reading the value does not clear it. The next Mhook_SetHook() or
+ * Mhook_Unhook() call on the same thread replaces it, so callers that need a
+ * diagnostic should retrieve it immediately after the operation.
+ *
+ * @return One of the MHOOK_STATUS values describing the latest operation on
+ *         the calling thread.
+ */
+MHOOK_STATUS Mhook_GetLastStatus(void);
 
 #ifdef __cplusplus
 }
