@@ -84,7 +84,10 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_THREAD_SUSPENSION_FAILED = 7,
 
     /** An instruction-cache flush for modified code failed. */
-    MHOOK_STATUS_PATCH_FAILED = 8
+    MHOOK_STATUS_PATCH_FAILED = 8,
+
+    /** Another writer modified the target after the hook was installed. */
+    MHOOK_STATUS_TARGET_MODIFIED = 9
 } MHOOK_STATUS;
 
 

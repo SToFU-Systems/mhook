@@ -943,6 +943,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 	BOOL bRet = FALSE;
 	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
 	MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
+
 	EnterCritSec();
 	// get the trampoline structure that corresponds to our function
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)*ppHookedFunction);
@@ -962,6 +963,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 				pTrampoline->cbOverwrittenCode) != 0) {
 			ODPRINTF((L"mhooks: Mhook_Unhook: %p no longer holds our patch, refusing to restore",
 				pTrampoline->pSystemFunction));
+			operationStatus = MHOOK_STATUS_TARGET_MODIFIED;
 			dwError = MHOOK_ERROR_TARGET_MODIFIED;
 		}
 		// make memory writable
@@ -998,7 +1000,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 		SetLastError(dwError);
 
 	g_lastStatus = operationStatus;
-	return bRet;
+	return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================

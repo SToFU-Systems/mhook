@@ -177,6 +177,8 @@ static int CaseConflict(void)
         return Fail("Mhook_Unhook restored a target somebody else had patched");
     if (GetLastError() != MHOOK_ERROR_TARGET_MODIFIED)
         return Fail("Mhook_Unhook did not report the conflict through GetLastError");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_TARGET_MODIFIED)
+        return Fail("Mhook_Unhook reported the wrong status for a modified target");
     if (trampoline != before)
         return Fail("the refused Mhook_Unhook still overwrote the pointer");
     if (memcmp(target, patched, TARGET_BUFFER_SIZE) != 0)
