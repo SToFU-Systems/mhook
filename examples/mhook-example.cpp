@@ -136,6 +136,29 @@ ULONG WINAPI HookNtClose(HANDLE hHandle) {
 }
 
 //=========================================================================
+// Removes a hook and reports what happened.
+//
+// Mhook_Unhook refuses to restore a prologue that no longer holds Mhook's own
+// patch, so that a second hooking engine's work is never silently erased. When
+// that happens the hook is still in place, so a real program can either leave
+// it alone or come back and retry later - here we just say so and move on.
+//
+static void UnhookAndReport(PVOID* ppHookedFunction, const char* pszName)
+{
+	if (Mhook_Unhook(ppHookedFunction)) {
+		printf("Unhooked %s\n", pszName);
+		return;
+	}
+	const DWORD dwError = GetLastError();
+	if (dwError == MHOOK_ERROR_TARGET_MODIFIED) {
+		printf("Could not unhook %s: somebody else patched %p after we did, "
+			"leaving our hook in place\n", pszName, Mhook_GetTarget(*ppHookedFunction));
+	} else {
+		printf("Could not unhook %s: error %d\n", pszName, dwError);
+	}
+}
+
+//=========================================================================
 // This is where the work gets done.
 //
 int wmain(int argc, WCHAR* argv[])
@@ -155,7 +178,7 @@ int wmain(int argc, WCHAR* argv[])
 			printf("Could not open self: %d\n", GetLastError());
 		}
 		// Remove the hook
-		Mhook_Unhook((PVOID*)&TrueNtOpenProcess);
+		UnhookAndReport((PVOID*)&TrueNtOpenProcess, "NtOpenProcess");
 	}
 
 	// Call OpenProces again - this time there won't be a redirection as
@@ -186,7 +209,7 @@ int wmain(int argc, WCHAR* argv[])
 		DeleteDC(hdcMem);
 		ReleaseDC(NULL, hdc);
 		// Remove the hook
-		Mhook_Unhook((PVOID*)&TrueSelectObject);
+		UnhookAndReport((PVOID*)&TrueSelectObject, "SelectObject");
 	}
 
 	printf("Testing getaddrinfo.\n");
@@ -213,7 +236,7 @@ int wmain(int argc, WCHAR* argv[])
 		}
 		WSACleanup();
 		// Remove the hook
-		Mhook_Unhook((PVOID*)&Truegetaddrinfo);
+		UnhookAndReport((PVOID*)&Truegetaddrinfo, "getaddrinfo");
 	}
 
 	printf("Testing HeapAlloc.\n");
@@ -221,7 +244,7 @@ int wmain(int argc, WCHAR* argv[])
 	{
 		free(malloc(10));
 		// Remove the hook
-		Mhook_Unhook((PVOID*)&TrueHeapAlloc);
+		UnhookAndReport((PVOID*)&TrueHeapAlloc, "HeapAlloc");
 	}
 
 	printf("Testing NtClose.\n");
@@ -229,7 +252,7 @@ int wmain(int argc, WCHAR* argv[])
 	{
 		CloseHandle(NULL);
 		// Remove the hook
-		Mhook_Unhook((PVOID*)&TrueNtClose);
+		UnhookAndReport((PVOID*)&TrueNtClose, "NtClose");
 	}
 
 	return 0;

@@ -32,6 +32,15 @@ static int Fail(const char* message)
 // DisassembleAndSkip can accept for MHOOK_JMPSIZE.
 static const BYTE kMovEaxRet[] = { 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
 
+// Every hook and unhook pair costs two system wide thread snapshots inside
+// SuspendOtherThreads, which dominates the runtime of the bulk cases. CI cannot
+// afford the exhaustive versions, so they sample deterministically by default
+// and run in full when MHOOK_TEST_EXHAUSTIVE is set in the environment.
+static bool Exhaustive(void)
+{
+    return GetEnvironmentVariableA("MHOOK_TEST_EXHAUSTIVE", NULL, 0) != 0;
+}
+
 static volatile LONG g_hookCalls = 0;
 // CaseTrampoline is the only case that uses this global, and HookChaining is
 // the only function that reads it: HookChaining takes zero arguments, so it
@@ -138,6 +147,65 @@ static int CaseRestore(void)
         return Fail("the unhooked target did not produce the original result");
     if (g_hookCalls != 0)
         return Fail("the hook ran after unhooking");
+    return 0;
+}
+
+static int CaseConflict(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
+        return Fail("Mhook_SetHook failed on a five byte prologue");
+    if (Mhook_GetTarget(trampoline) != (PVOID)target)
+        return Fail("Mhook_GetTarget did not report the patched address");
+
+    // Stand in for a second hooking engine patching the same prologue after we
+    // did. Byte one is inside the relative displacement of our own jump, so it
+    // is squarely within the overwrite zone Mhook recorded.
+    target[1] ^= 0xFF;
+    FlushInstructionCache(GetCurrentProcess(), target, TARGET_BUFFER_SIZE);
+
+    BYTE patched[TARGET_BUFFER_SIZE];
+    memcpy(patched, target, TARGET_BUFFER_SIZE);
+
+    PVOID const before = trampoline;
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook restored a target somebody else had patched");
+    if (GetLastError() != MHOOK_ERROR_TARGET_MODIFIED)
+        return Fail("Mhook_Unhook did not report the conflict through GetLastError");
+    if (trampoline != before)
+        return Fail("the refused Mhook_Unhook still overwrote the pointer");
+    if (memcmp(target, patched, TARGET_BUFFER_SIZE) != 0)
+        return Fail("the refused Mhook_Unhook modified the target bytes");
+    // The conflict has to leave the caller something actionable to log.
+    if (Mhook_GetTarget(trampoline) != (PVOID)target)
+        return Fail("Mhook_GetTarget did not report the contested address after the conflict");
+
+    // The hook is still registered, so putting the prologue back the way Mhook
+    // left it must let a second attempt through.
+    target[1] ^= 0xFF;
+    FlushInstructionCache(GetCurrentProcess(), target, TARGET_BUFFER_SIZE);
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed after the conflicting patch was reverted");
+    if (trampoline != (PVOID)target)
+        return Fail("Mhook_Unhook did not write the original address back");
+    if (((TargetFn)target)() != TARGET_RESULT)
+        return Fail("the unhooked target did not produce the original result");
+
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_GetTarget(trampoline) != NULL)
+        return Fail("Mhook_GetTarget reported a target for a function that is not hooked");
+    if (GetLastError() != MHOOK_ERROR_NOT_HOOKED)
+        return Fail("Mhook_GetTarget did not report MHOOK_ERROR_NOT_HOOKED");
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook succeeded for a function that is not hooked");
+    if (GetLastError() != MHOOK_ERROR_NOT_HOOKED)
+        return Fail("Mhook_Unhook did not report MHOOK_ERROR_NOT_HOOKED");
     return 0;
 }
 
@@ -288,7 +356,9 @@ static int CaseThreads(void)
     }
 
     int status = 0;
-    for (int i = 0; i < 100 && status == 0; ++i) {
+    // Each iteration hooks and unhooks while four threads hammer the target.
+    const int rounds = Exhaustive() ? 100 : 25;
+    for (int i = 0; i < rounds && status == 0; ++i) {
         PVOID trampoline = target;
         if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
             status = Fail("Mhook_SetHook failed while other threads were running");
@@ -317,7 +387,8 @@ static int CaseReuse(void)
     BYTE snapshot[TARGET_BUFFER_SIZE];
     memcpy(snapshot, target, TARGET_BUFFER_SIZE);
 
-    for (int i = 0; i < 1000; ++i) {
+    const int cycles = Exhaustive() ? 1000 : 100;
+    for (int i = 0; i < cycles; ++i) {
         PVOID trampoline = target;
         if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
             return Fail("Mhook_SetHook failed during repeated hook and unhook cycles");
@@ -347,8 +418,14 @@ static bool PrologueJumpsElsewhere(const BYTE* code)
     return false;
 }
 
-static int SweepModule(const wchar_t* moduleName, PBYTE scratch, int* hooked, int* skipped, int* refused)
+static int SweepModule(const wchar_t* moduleName, PBYTE scratch, int* hooked, int* skipped, int* refused,
+                      int* sampledOut)
 {
+    // Taking every Nth name keeps the sweep spread across the whole export
+    // table, and keeps it reproducible from run to run, which random sampling
+    // would not.
+    const DWORD stride = Exhaustive() ? 1 : 10;
+
     HMODULE module = LoadLibraryW(moduleName);
     if (!module)
         return Fail("LoadLibraryW failed for a system module the sweep needs");
@@ -367,6 +444,10 @@ static int SweepModule(const wchar_t* moduleName, PBYTE scratch, int* hooked, in
     const DWORD* functionRvas = (const DWORD*)(base + exports->AddressOfFunctions);
 
     for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+        if (i % stride != 0) {
+            (*sampledOut)++;
+            continue;
+        }
         const char* name = (const char*)(base + nameRvas[i]);
         const DWORD functionRva = functionRvas[ordinals[i]];
 
@@ -434,14 +515,17 @@ static int CaseSweep(void)
     int hooked = 0;
     int skipped = 0;
     int refused = 0;
+    int sampledOut = 0;
     for (size_t i = 0; i < sizeof(kModules) / sizeof(kModules[0]); ++i) {
-        const int status = SweepModule(kModules[i], scratch, &hooked, &skipped, &refused);
+        const int status = SweepModule(kModules[i], scratch, &hooked, &skipped, &refused, &sampledOut);
         if (status != 0)
             return status;
     }
 
-    printf("sweep: %d prologues hooked and restored, %d skipped by the harness, %d refused by Mhook_SetHook\n",
-           hooked, skipped, refused);
+    printf("sweep: %d prologues hooked and restored, %d skipped by the harness, "
+           "%d refused by Mhook_SetHook, %d not sampled%s\n",
+           hooked, skipped, refused, sampledOut,
+           Exhaustive() ? "" : " (set MHOOK_TEST_EXHAUSTIVE for the full sweep)");
     if (hooked == 0)
         return Fail("no prologue could be hooked at all, so the sweep proved nothing");
     return 0;
@@ -456,6 +540,7 @@ static const TestCase kCases[] = {
     { "basic", CaseBasic },
     { "trampoline", CaseTrampoline },
     { "restore", CaseRestore },
+    { "conflict", CaseConflict },
     { "passthrough", CasePassthrough },
     { "thunk", CaseThunk },
     { "short_func", CaseShortFunc },
