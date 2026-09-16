@@ -27,4 +27,12 @@ set_tests_properties(
     mhook.hook.basic mhook.hook.trampoline mhook.hook.restore
     mhook.hook.passthrough mhook.hook.thunk mhook.hook.short_func
     PROPERTIES TIMEOUT 15)
-set_tests_properties(mhook.hook.threads mhook.hook.reuse mhook.hook.sweep PROPERTIES TIMEOUT 300)
+# Every hook and unhook pair costs two system wide thread snapshots inside the
+# library, and that rate, not the hook engine, sets the runtime of the bulk
+# cases. They therefore sample by default, which is what these timeouts are
+# sized for. Setting MHOOK_TEST_EXHAUSTIVE in the environment runs them in full
+# instead, which takes roughly twenty minutes per configuration, so keep that
+# for a nightly job rather than a pull request.
+set_tests_properties(mhook.hook.threads PROPERTIES TIMEOUT 120)
+set_tests_properties(mhook.hook.reuse PROPERTIES TIMEOUT 180)
+set_tests_properties(mhook.hook.sweep PROPERTIES TIMEOUT 300)
