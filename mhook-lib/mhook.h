@@ -30,6 +30,18 @@
 
 #pragma once
 
+/**
+ * @file
+ * @brief Public interface of the Mhook function hooking library.
+ *
+ * A hook overwrites the start of the target's prologue with a jump, and moves
+ * the displaced instructions into a trampoline that jumps back to the rest of
+ * the function, so the replacement can still call the code it replaced.
+ *
+ * All entry points serialise on one process wide lock. Installing and removing
+ * a hook suspends the other threads of the process for the duration.
+ */
+
 #include <windows.h>
 
 #ifdef __cplusplus
@@ -37,34 +49,73 @@ extern "C"
 {
 #endif //__cplusplus
 
-// Error codes reported through GetLastError() when the functions below fail.
-// Bit 29 is the range Windows reserves for application-defined codes, so these
-// can never collide with a system error.
+/**
+ * @name Error codes reported through GetLastError()
+ * The values sit in the range Windows reserves for application defined codes.
+ * @{
+ */
+
+/** The pointer does not name a hook that is currently installed. */
 #define MHOOK_ERROR_NOT_HOOKED      ((DWORD)((1UL << 29) | 1UL))
+
+/** Another writer has patched the target since. See Mhook_Unhook(). */
 #define MHOOK_ERROR_TARGET_MODIFIED ((DWORD)((1UL << 29) | 2UL))
 
+/** @} */
+
+/**
+ * @brief Installs a hook, redirecting a function to a replacement.
+ *
+ * Both addresses are followed through jump thunks first, so hooking an import
+ * stub hooks the function behind it.
+ *
+ * @param[in,out] ppSystemFunction On entry the function to hook. On success,
+ *        receives the trampoline: call it to reach the original, and pass it to
+ *        Mhook_Unhook() and Mhook_GetTarget(). Unchanged on failure.
+ * @param[in]     pHookFunction    Replacement, with the same calling convention
+ *        and signature as the target.
+ * @return TRUE if the hook was installed.
+ *
+ * @note Fails if the prologue does not decode into at least five bytes of whole
+ *       instructions, and does not report a reason through GetLastError().
+ */
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
-// Restores the bytes Mhook overwrote and returns TRUE, writing the original
-// function address back through ppHookedFunction.
-//
-// Returns FALSE without touching the target, and without touching
-// *ppHookedFunction, when the prologue no longer holds the patch Mhook
-// installed, which means another writer has patched the same code since. The
-// hook then stays registered - Mhook holds the only copy of the original bytes,
-// so throwing it away would make the code unrestorable for good - and
-// GetLastError() reports MHOOK_ERROR_TARGET_MODIFIED. A caller that sees this
-// can leave the hook in place, or retry later: once the other writer restores
-// Mhook's patch, a second call succeeds normally. Use Mhook_GetTarget to find
-// out which address is contested.
-//
-// Returns FALSE with MHOOK_ERROR_NOT_HOOKED when ppHookedFunction does not name
-// a live hook.
+/**
+ * @brief Removes a hook and restores the bytes it overwrote.
+ *
+ * Restores only if the prologue still holds exactly the patch this hook
+ * installed. Otherwise another writer has patched the same code since, and
+ * nothing is written, so their work is not destroyed.
+ *
+ * The hook then stays installed, because Mhook holds the only copy of the
+ * original bytes. Retry once the other writer puts Mhook's patch back, or leave
+ * the hook in place. Mhook_GetTarget() names the contested address.
+ *
+ * @param[in,out] ppHookedFunction The trampoline from Mhook_SetHook(). On
+ *        success receives the original function address; unchanged on any
+ *        failure, so a refused call can be retried with the same pointer.
+ * @return TRUE if the original bytes were restored.
+ * @retval FALSE GetLastError() is MHOOK_ERROR_TARGET_MODIFIED,
+ *         MHOOK_ERROR_NOT_HOOKED, or the code from the failed VirtualProtect.
+ *
+ * @warning The trampoline is not freed, since a thread may still be running in
+ *          it, but it must not be called once this returns TRUE.
+ */
 BOOL Mhook_Unhook(PVOID *ppHookedFunction);
 
-// Returns the address Mhook patched for a live hook, given the pointer
-// Mhook_SetHook produced. Returns NULL and sets MHOOK_ERROR_NOT_HOOKED if there
-// is no such hook.
+/**
+ * @brief Reports which address an installed hook patched.
+ *
+ * The way to learn which address is contested after Mhook_Unhook() refuses.
+ *
+ * @param[in] pHookedFunction The trampoline from Mhook_SetHook().
+ * @return The patched address, or NULL with MHOOK_ERROR_NOT_HOOKED if the
+ *         pointer names no installed hook.
+ *
+ * @note This is the address after jump thunks were followed, not necessarily
+ *       the one handed to Mhook_SetHook().
+ */
 PVOID Mhook_GetTarget(PVOID pHookedFunction);
 
 #ifdef __cplusplus
