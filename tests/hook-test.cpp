@@ -150,6 +150,65 @@ static int CaseRestore(void)
     return 0;
 }
 
+static int CaseConflict(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
+        return Fail("Mhook_SetHook failed on a five byte prologue");
+    if (Mhook_GetTarget(trampoline) != (PVOID)target)
+        return Fail("Mhook_GetTarget did not report the patched address");
+
+    // Stand in for a second hooking engine patching the same prologue after we
+    // did. Byte one is inside the relative displacement of our own jump, so it
+    // is squarely within the overwrite zone Mhook recorded.
+    target[1] ^= 0xFF;
+    FlushInstructionCache(GetCurrentProcess(), target, TARGET_BUFFER_SIZE);
+
+    BYTE patched[TARGET_BUFFER_SIZE];
+    memcpy(patched, target, TARGET_BUFFER_SIZE);
+
+    PVOID const before = trampoline;
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook restored a target somebody else had patched");
+    if (GetLastError() != MHOOK_ERROR_TARGET_MODIFIED)
+        return Fail("Mhook_Unhook did not report the conflict through GetLastError");
+    if (trampoline != before)
+        return Fail("the refused Mhook_Unhook still overwrote the pointer");
+    if (memcmp(target, patched, TARGET_BUFFER_SIZE) != 0)
+        return Fail("the refused Mhook_Unhook modified the target bytes");
+    // The conflict has to leave the caller something actionable to log.
+    if (Mhook_GetTarget(trampoline) != (PVOID)target)
+        return Fail("Mhook_GetTarget did not report the contested address after the conflict");
+
+    // The hook is still registered, so putting the prologue back the way Mhook
+    // left it must let a second attempt through.
+    target[1] ^= 0xFF;
+    FlushInstructionCache(GetCurrentProcess(), target, TARGET_BUFFER_SIZE);
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed after the conflicting patch was reverted");
+    if (trampoline != (PVOID)target)
+        return Fail("Mhook_Unhook did not write the original address back");
+    if (((TargetFn)target)() != TARGET_RESULT)
+        return Fail("the unhooked target did not produce the original result");
+
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_GetTarget(trampoline) != NULL)
+        return Fail("Mhook_GetTarget reported a target for a function that is not hooked");
+    if (GetLastError() != MHOOK_ERROR_NOT_HOOKED)
+        return Fail("Mhook_GetTarget did not report MHOOK_ERROR_NOT_HOOKED");
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook succeeded for a function that is not hooked");
+    if (GetLastError() != MHOOK_ERROR_NOT_HOOKED)
+        return Fail("Mhook_Unhook did not report MHOOK_ERROR_NOT_HOOKED");
+    return 0;
+}
+
 typedef int (__stdcall *Sum5Fn)(int, int, int, int, int);
 
 __declspec(noinline) static int __stdcall Sum5(int a, int b, int c, int d, int e)
@@ -479,6 +538,7 @@ static const TestCase kCases[] = {
     { "basic", CaseBasic },
     { "trampoline", CaseTrampoline },
     { "restore", CaseRestore },
+    { "conflict", CaseConflict },
     { "passthrough", CasePassthrough },
     { "thunk", CaseThunk },
     { "short_func", CaseShortFunc },
