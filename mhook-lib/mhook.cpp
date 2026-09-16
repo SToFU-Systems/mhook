@@ -32,6 +32,7 @@
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "mhook.h"
 #include "../disasm-lib/disasm.h"
 
@@ -127,6 +128,9 @@ struct MHOOKS_TRAMPOLINE {
 															//   in the original location
 	BYTE	codeUntouched[MHOOKS_MAX_CODE_BYTES];			// placeholder for unmodified original code
 															//   (we patch IP-relative addressing)
+	BYTE	codeInstalledPatch[MHOOKS_MAX_CODE_BYTES];		// the exact bytes we left in the prologue, so
+															//   Mhook_Unhook can tell our own patch apart
+															//   from one somebody else wrote later
 	MHOOKS_TRAMPOLINE* pPrevTrampoline;						// When in the free list, thess are pointers to the prev and next entry.
 	MHOOKS_TRAMPOLINE* pNextTrampoline;						// When not in the free list, this is a pointer to the prev and next trampoline in use.
 };
@@ -200,7 +204,7 @@ static VOID ListRemove(MHOOKS_TRAMPOLINE** pListHead, MHOOKS_TRAMPOLINE* pNode) 
 
 	if ((*pListHead) == pNode) {
 		(*pListHead) = pNode->pNextTrampoline;
-		assert((*pListHead)->pPrevTrampoline == NULL);
+		assert(!(*pListHead) || (*pListHead)->pPrevTrampoline == NULL);
 	}
 
 	pNode->pPrevTrampoline = NULL;
@@ -458,7 +462,7 @@ static MHOOKS_TRAMPOLINE* TrampolineGet(PBYTE pHookedFunction) {
 	MHOOKS_TRAMPOLINE* pCurrent = g_pHooks;
 
 	while (pCurrent) {
-		if (pCurrent->pHookFunction == pHookedFunction) {
+		if (pCurrent->codeTrampoline == pHookedFunction) {
 			return pCurrent;
 		}
 
@@ -856,6 +860,12 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 						pbCode = EmitJump(pbCode, (PBYTE)pHookFunction);
 					}
 
+					// Snapshot what we actually left in the prologue rather than
+					// recomputing it later: this captures whichever jump form
+					// EmitJump chose, plus any original bytes trailing it when
+					// the overwrite zone is longer than the jump.
+					memcpy(pTrampoline->codeInstalledPatch, pSystemFunction, dwInstructionLength);
+
 					// update data members
 					pTrampoline->cbOverwrittenCode = dwInstructionLength;
 					pTrampoline->pSystemFunction = (PBYTE)pSystemFunction;
@@ -897,6 +907,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 	ODPRINTF((L"mhooks: Mhook_Unhook: %p", *ppHookedFunction));
 	BOOL bRet = FALSE;
+	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
 	EnterCritSec();
 	// get the trampoline structure that corresponds to our function
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)*ppHookedFunction);
@@ -905,8 +916,21 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 		SuspendOtherThreads(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
 		ODPRINTF((L"mhooks: Mhook_Unhook: found struct at %p", pTrampoline));
 		DWORD dwOldProtectSystemFunction = 0;
+		// Somebody may have patched this prologue after we did. Writing the
+		// original bytes back would silently destroy their patch, so refuse and
+		// leave the target exactly as we found it. The hook stays registered on
+		// purpose: codeUntouched is the only surviving copy of the original
+		// bytes, so discarding it here would make the code unrestorable for
+		// good, and keeping it lets the caller retry once the other writer has
+		// put our patch back.
+		if (memcmp(pTrampoline->pSystemFunction, pTrampoline->codeInstalledPatch,
+				pTrampoline->cbOverwrittenCode) != 0) {
+			ODPRINTF((L"mhooks: Mhook_Unhook: %p no longer holds our patch, refusing to restore",
+				pTrampoline->pSystemFunction));
+			dwError = MHOOK_ERROR_TARGET_MODIFIED;
+		}
 		// make memory writable
-		if (VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction)) {
+		else if (VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction)) {
 			ODPRINTF((L"mhooks: Mhook_Unhook: readwrite set on system function"));
 			PBYTE pbCode = (PBYTE)pTrampoline->pSystemFunction;
 			for (DWORD i = 0; i<pTrampoline->cbOverwrittenCode; i++) {
@@ -923,13 +947,30 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 			TrampolineFree(pTrampoline, FALSE);
 			ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
 		} else {
-			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", gle()));
+			// keep VirtualProtect's own reason, it is more useful than ours
+			dwError = gle();
+			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", dwError));
 		}
 		// make the other guys runnable
 		ResumeOtherThreads();
 	}
 	LeaveCritSec();
+	// set this after leaving the critical section so nothing in between can
+	// overwrite the reason we are reporting
+	if (!bRet)
+		SetLastError(dwError);
 	return bRet;
+}
+
+//=========================================================================
+PVOID Mhook_GetTarget(PVOID pHookedFunction) {
+	EnterCritSec();
+	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
+	PVOID pTarget = pTrampoline ? (PVOID)pTrampoline->pSystemFunction : NULL;
+	LeaveCritSec();
+	if (!pTarget)
+		SetLastError(MHOOK_ERROR_NOT_HOOKED);
+	return pTarget;
 }
 
 //=========================================================================
