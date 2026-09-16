@@ -239,6 +239,8 @@ static int CaseShortFunc(void)
     PVOID trampoline = target;
     if (Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
         return Fail("Mhook_SetHook accepted a function shorter than MHOOK_JMPSIZE");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+        return Fail("Mhook_SetHook reported the wrong status for a short prologue");
     if (trampoline != (PVOID)target)
         return Fail("the failed Mhook_SetHook still overwrote the pointer");
     if (memcmp(target, snapshot, TARGET_BUFFER_SIZE) != 0)
