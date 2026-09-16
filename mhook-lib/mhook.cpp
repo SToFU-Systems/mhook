@@ -675,8 +675,10 @@ static void FixupIPRelativeAddressing(PBYTE pbNew, PBYTE pbOriginal, MHOOKS_PATC
 // at which point disassembly must stop.
 // Finally, detect and collect information on IP-relative instructions
 // that we can patch.
-static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDATA* pdata) {
-	DWORD dwRet = 0;
+static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDATA* pdata, OUT MHOOK_STATUS* pStatus)
+{
+    DWORD dwRet = 0;
+    *pStatus = MHOOK_STATUS_DECODE_FAILED;
 	pdata->nLimitDown = 0;
 	pdata->nLimitUp = 0;
 	pdata->nRipCnt = 0;
@@ -777,6 +779,11 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 			pLoc  += pins->Length;
 		}
 
+		if (dwRet >= dwMinLen)
+            *pStatus = MHOOK_STATUS_SUCCESS;
+		else if (pins)
+            *pStatus = MHOOK_STATUS_UNSUPPORTED_PROLOGUE;
+
 		CloseDisassembler(&dis);
 	}
 
@@ -815,8 +822,9 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
 	// figure out the length of the overwrite zone
 	MHOOKS_PATCHDATA patchdata = {0};
-	DWORD dwInstructionLength = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata);
-	if (dwInstructionLength >= MHOOK_JMPSIZE) {
+
+	DWORD dwInstructionLength = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata, &operationStatus);
+	if (operationStatus == MHOOK_STATUS_SUCCESS) {
 		ODPRINTF((L"mhooks: Mhook_SetHook: disassembly signals %d bytes", dwInstructionLength));
 		// suspend every other thread in this process, and make sure their IP 
 		// is not in the code we're about to overwrite.
