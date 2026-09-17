@@ -235,28 +235,46 @@ __declspec(noinline) static int __stdcall HookSum5(int a, int b, int c, int d, i
 
 static int CasePassthrough(void)
 {
+    const DWORD kInstallLastError = ERROR_ACCESS_DENIED;
+    const DWORD kCallThroughLastError = ERROR_BAD_COMMAND;
+    const DWORD kUnhookLastError = ERROR_BUSY;
     static Sum5Fn volatile callSum5 = &Sum5;
+    int result = 0;
 
     if (callSum5(1, 2, 3, 4, 5) != 15)
         return Fail("the unhooked target does not sum its arguments");
 
     PVOID original = (PVOID)&Sum5;
-    if (!Mhook_SetHook(&original, (PVOID)&HookSum5))
+    SetLastError(kInstallLastError);
+    const BOOL hookInstalled = Mhook_SetHook(&original, (PVOID)&HookSum5);
+    const DWORD installLastError = GetLastError();
+    if (!hookInstalled)
         return Fail("Mhook_SetHook failed on the compiled target");
+    if (installLastError != kInstallLastError)
+        result = Fail("Mhook_SetHook did not preserve the caller's last error");
     g_trueSum5 = (Sum5Fn)original;
 
     g_sum5HookCalls = 0;
+    SetLastError(kCallThroughLastError);
     const int hooked = callSum5(1, 2, 3, 4, 5);
+    const DWORD callThroughLastError = GetLastError();
     if (g_sum5HookCalls != 1)
         return Fail("the hook ran a number of times other than once");
     if (hooked != 16)
         return Fail("arguments or the return value were corrupted passing through the hook");
+    if (!result && callThroughLastError != kCallThroughLastError)
+        result = Fail("calling through the trampoline changed the caller's last error");
 
-    if (!Mhook_Unhook(&original))
+    SetLastError(kUnhookLastError);
+    const BOOL hookRemoved = Mhook_Unhook(&original);
+    const DWORD unhookLastError = GetLastError();
+    if (!hookRemoved)
         return Fail("Mhook_Unhook failed");
+    if (!result && unhookLastError != kUnhookLastError)
+        result = Fail("Mhook_Unhook did not preserve the caller's last error");
     if (callSum5(1, 2, 3, 4, 5) != 15)
         return Fail("the unhooked target no longer sums its arguments");
-    return 0;
+    return result;
 }
 
 static int CaseThunk(void)
