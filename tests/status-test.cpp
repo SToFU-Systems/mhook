@@ -108,6 +108,28 @@ static BOOL makeMemoryExecutable(PVOID memory, SIZE_T size)
 
 
 /**
+ * @brief Writes a near relative jump between addresses in one test allocation.
+ * @param[out] instruction Buffer receiving the jump instruction.
+ * @param[in] target Jump destination.
+ * @return TRUE when the relative displacement can be represented.
+ */
+static BOOL writeRelativeJump(OUT PBYTE instruction, PBYTE target)
+{
+    const uint8_t kJumpOpcode = 0xE9;
+    const SIZE_T kJumpSize = 5;
+    const INT64 displacement = target - (instruction + kJumpSize);
+
+    if (displacement < INT32_MIN || displacement > INT32_MAX)
+        return FALSE;
+
+    const int32_t relativeDisplacement = static_cast<int32_t>(displacement);
+    instruction[0] = kJumpOpcode;
+    memcpy(instruction + 1, &relativeDisplacement, sizeof(relativeDisplacement));
+    return TRUE;
+}
+
+
+/**
  * @brief Verifies that an invalid set request fails without changing caller or target state.
  * @param[in] systemFunction Requested system-function address.
  * @param[in] hookFunction Requested hook-function address.
@@ -464,6 +486,88 @@ static int caseInvalidSetThunkDepth(void)
 
 
 /**
+ * @brief Verifies that self-hooks and requests reaching active targets are rejected before mutation.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetConflict(void)
+{
+    const SIZE_T kFirstThunkOffset = 0;
+    const SIZE_T kSecondThunkOffset = 8;
+    const SIZE_T kTargetOffset = 16;
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the conflicting hook test failed");
+
+    memset(memory, 0xCC, kTargetBufferSize);
+    PBYTE firstThunk = memory + kFirstThunkOffset;
+    PBYTE secondThunk = memory + kSecondThunkOffset;
+    PBYTE target = memory + kTargetOffset;
+    memcpy(target, kMovEaxRet, sizeof(kMovEaxRet));
+
+    const BOOL firstJumpResult = writeRelativeJump(firstThunk, target);
+    const BOOL secondJumpResult = writeRelativeJump(secondThunk, target);
+    const BOOL protectionResult = firstJumpResult && secondJumpResult && makeMemoryExecutable(memory, kTargetBufferSize);
+    if (!protectionResult)
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("preparing the conflicting hook test failed");
+    }
+
+    BYTE originalBytes[kTargetBufferSize] = {};
+    memcpy(originalBytes, memory, sizeof(originalBytes));
+    int result = expectInvalidSet(target, target, MHOOK_STATUS_INVALID_ARGUMENT, memory, originalBytes, sizeof(originalBytes));
+
+    const int resolvedSelfResult = expectInvalidSet(firstThunk, target, MHOOK_STATUS_INVALID_ARGUMENT, memory, originalBytes, sizeof(originalBytes));
+    if (!result)
+        result = resolvedSelfResult;
+
+    PVOID activeTrampoline = firstThunk;
+    if (!Mhook_SetHook(&activeTrampoline, reinterpret_cast<PVOID>(&HookReplacement)))
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("installing the active hook for conflict testing failed");
+    }
+
+    BYTE hookedBytes[kTargetBufferSize] = {};
+    memcpy(hookedBytes, memory, sizeof(hookedBytes));
+    const int directDuplicateResult = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookTarget), MHOOK_STATUS_ALREADY_HOOKED, memory, hookedBytes, sizeof(hookedBytes));
+    if (!result)
+        result = directDuplicateResult;
+
+    const int resolvedDuplicateResult = expectInvalidSet(secondThunk, reinterpret_cast<PVOID>(&HookTarget), MHOOK_STATUS_ALREADY_HOOKED, memory, hookedBytes, sizeof(hookedBytes));
+    if (!result)
+        result = resolvedDuplicateResult;
+
+    PBYTE availableTarget = allocateTarget();
+    if (!availableTarget)
+    {
+        Mhook_Unhook(&activeTrampoline);
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("allocating the replacement-chain conflict target failed");
+    }
+
+    BYTE availableBytes[kTargetBufferSize] = {};
+    memcpy(availableBytes, availableTarget, sizeof(availableBytes));
+    const int replacementConflictResult = expectInvalidSet(availableTarget, secondThunk, MHOOK_STATUS_ALREADY_HOOKED, availableTarget, availableBytes, sizeof(availableBytes));
+    if (!result)
+        result = replacementConflictResult;
+    VirtualFree(availableTarget, 0, MEM_RELEASE);
+
+    const BOOL unhookResult = Mhook_Unhook(&activeTrampoline);
+    const BOOL restored = memcmp(memory, originalBytes, sizeof(originalBytes)) == 0;
+    VirtualFree(memory, 0, MEM_RELEASE);
+
+    if (!unhookResult)
+        return Fail("removing the active hook after conflict testing failed");
+    if (!restored)
+        return Fail("conflicting hook tests did not restore the original code");
+
+    return result;
+}
+
+
+/**
  * @brief Verifies that Mhook_SetHook rejects a misaligned pointer slot.
  * @return Zero on success; otherwise a test failure code.
  */
@@ -683,6 +787,27 @@ static int CaseInvalidUnhook(void)
     return 0;
 }
 
+
+/**
+ * @brief Verifies that an unowned trampoline value is rejected without being dereferenced.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidUnhookAddress(void)
+{
+    PVOID trampoline = reinterpret_cast<PVOID>(1);
+    const PVOID originalValue = trampoline;
+
+    if (Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook accepted an unowned trampoline address");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_HOOK_NOT_FOUND)
+        return Fail("an unowned trampoline address did not report HOOK_NOT_FOUND");
+    if (trampoline != originalValue)
+        return Fail("a rejected unowned trampoline changed the caller's descriptor");
+
+    return 0;
+}
+
+
 static int CaseNotFound(void)
 {
     PVOID target = reinterpret_cast<PVOID>(&HookTarget);
@@ -783,6 +908,7 @@ static const StatusTestCase kStatusTestCases[] = {
     { "invalid_set_thunk_indirect", caseInvalidSetThunkIndirect },
     { "invalid_set_thunk_cycle", caseInvalidSetThunkCycle },
     { "invalid_set_thunk_depth", caseInvalidSetThunkDepth },
+    { "invalid_set_conflict", caseInvalidSetConflict },
     { "invalid_set_slot_alignment", caseInvalidSetSlotAlignment },
     { "invalid_set_slot_access", caseInvalidSetSlotAccess },
     { "invalid_set_slot_write", caseInvalidSetSlotWrite },
@@ -790,6 +916,7 @@ static const StatusTestCase kStatusTestCases[] = {
     { "invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment },
     { "invalid_unhook_slot_access", caseInvalidUnhookSlotAccess },
     { "invalid_unhook_slot_write", caseInvalidUnhookSlotWrite },
+    { "invalid_unhook_address", caseInvalidUnhookAddress },
     { "not_found", CaseNotFound },
     { "thread_local", CaseThreadLocal },
     { "success", CaseSuccess }

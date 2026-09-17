@@ -62,7 +62,7 @@ typedef enum MHOOK_STATUS
     /** No monitored operation reported a failure. */
     MHOOK_STATUS_SUCCESS = 0,
 
-    /** A required pointer or pointed-to address was NULL. */
+    /** A required address is NULL, or the resolved target and replacement are identical. */
     MHOOK_STATUS_INVALID_ARGUMENT = 1,
 
     /** The target prologue could not be decoded. */
@@ -99,7 +99,10 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_JUMP_CYCLE = 12,
 
     /** Following entry-point jumps exceeded the supported depth. */
-    MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13
+    MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13,
+
+    /** A function-resolution chain reached a target with an active hook. */
+    MHOOK_STATUS_ALREADY_HOOKED = 14
 } MHOOK_STATUS;
 
 
@@ -122,7 +125,8 @@ typedef enum MHOOK_STATUS
  *
  * Both addresses are followed through up to 16 jump thunks first, so hooking
  * an import stub hooks the function behind it. Longer or cyclic chains are
- * rejected.
+ * rejected. Requests are also rejected when both chains resolve to the same
+ * address or either chain reaches a target with an active hook.
  *
  * @param[in,out] ppSystemFunction On entry the function to hook. On success,
  *        receives the trampoline: call it to reach the original, and pass it to

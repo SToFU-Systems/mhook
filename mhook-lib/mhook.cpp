@@ -349,6 +349,29 @@ static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
 
 
 /**
+ * @brief Finds an active hook by its resolved target address.
+ * @param[in] targetFunction Resolved target address to find.
+ * @return The registered trampoline, or NULL when the target is not hooked.
+ * @remark The caller must hold the hook registry critical section.
+ */
+static MHOOKS_TRAMPOLINE* findActiveHookByTarget(PBYTE targetFunction)
+{
+    assert(targetFunction);
+
+    MHOOKS_TRAMPOLINE* currentHook = g_pHooks;
+    while (currentHook)
+    {
+        if (currentHook->pSystemFunction == targetFunction)
+            return currentHook;
+
+        currentHook = currentHook->pNextTrampoline;
+    }
+
+    return NULL;
+}
+
+
+/**
  * @brief Calculates a checked address relative to the end of an instruction.
  * @param[in] instruction Address of the instruction.
  * @param[in] instructionSize Encoded instruction size.
@@ -630,6 +653,9 @@ static MHOOK_STATUS resolveFunctionTarget(PBYTE function, OUT PBYTE* target)
 
     for (SIZE_T depth = 0; depth <= kMaximumJumpDepth; ++depth)
     {
+        if (findActiveHookByTarget(currentFunction))
+            return MHOOK_STATUS_ALREADY_HOOKED;
+
         visitedFunctions[depth] = currentFunction;
 
         PBYTE nextFunction = NULL;
@@ -656,6 +682,37 @@ static MHOOK_STATUS resolveFunctionTarget(PBYTE function, OUT PBYTE* target)
 
     return MHOOK_STATUS_JUMP_DEPTH_EXCEEDED;
 }
+
+
+/**
+ * @brief Resolves and validates both functions in a hook request.
+ * @param[in] systemFunction Requested target function.
+ * @param[in] hookFunction Requested replacement function.
+ * @param[out] resolvedSystemFunction Resolved target function.
+ * @param[out] resolvedHookFunction Resolved replacement function.
+ * @return Success or the first request validation failure.
+ */
+static MHOOK_STATUS resolveHookRequest(PBYTE systemFunction, PBYTE hookFunction, OUT PBYTE* resolvedSystemFunction, OUT PBYTE* resolvedHookFunction)
+{
+    assert(systemFunction);
+    assert(hookFunction);
+    assert(resolvedSystemFunction);
+    assert(resolvedHookFunction);
+
+    MHOOK_STATUS status = resolveFunctionTarget(systemFunction, resolvedSystemFunction);
+    if (status != MHOOK_STATUS_SUCCESS)
+        return status;
+
+    status = resolveFunctionTarget(hookFunction, resolvedHookFunction);
+    if (status != MHOOK_STATUS_SUCCESS)
+        return status;
+
+    if (*resolvedSystemFunction == *resolvedHookFunction)
+        return MHOOK_STATUS_INVALID_ARGUMENT;
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
 
 //=========================================================================
 // Internal function:
@@ -1225,18 +1282,15 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
     }
 
 	MHOOKS_TRAMPOLINE* pTrampoline = NULL;
-    MHOOK_STATUS operationStatus = MHOOK_STATUS_SUCCESS;
 
 	// ensure thread-safety
 	EnterCritSec();
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
-	// find the real functions (jump over jump tables, if any)
+    // find the real functions (jump over jump tables, if any)
     PBYTE resolvedSystemFunction = NULL;
     PBYTE resolvedHookFunction = NULL;
-    operationStatus = resolveFunctionTarget(static_cast<PBYTE>(pSystemFunction), &resolvedSystemFunction);
 
-    if (operationStatus == MHOOK_STATUS_SUCCESS)
-        operationStatus = resolveFunctionTarget(static_cast<PBYTE>(pHookFunction), &resolvedHookFunction);
+    MHOOK_STATUS operationStatus = resolveHookRequest(static_cast<PBYTE>(pSystemFunction), static_cast<PBYTE>(pHookFunction), &resolvedSystemFunction, &resolvedHookFunction);
 
     if (operationStatus != MHOOK_STATUS_SUCCESS)
     {

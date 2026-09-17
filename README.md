@@ -31,7 +31,7 @@ Licensed under the [MIT License](LICENSE).
 | Status | Meaning | Handling |
 | --- | --- | --- |
 | `MHOOK_STATUS_SUCCESS` | No reported failure. | Continue normally. |
-| `MHOOK_STATUS_INVALID_ARGUMENT` | A required argument or pointed-to address is null. | Correct the call before retrying. |
+| `MHOOK_STATUS_INVALID_ARGUMENT` | A required address is null, or the target and replacement resolve to the same address. | Correct the call before retrying. |
 | `MHOOK_STATUS_DECODE_FAILED` | The target prologue could not be decoded. | Skip the target or use another hooking method. |
 | `MHOOK_STATUS_UNSUPPORTED_PROLOGUE` | The decoded prologue cannot hold a supported patch. | Skip the target or use another hooking method. |
 | `MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED` | No suitable trampoline could be allocated. | Retry only if memory availability may have changed. |
@@ -44,6 +44,7 @@ Licensed under the [MIT License](LICENSE).
 | `MHOOK_STATUS_INVALID_TARGET` | A target or replacement cannot be read as executable code, or an indirect jump slot is unreadable. | Correct the address or its memory protection before retrying. |
 | `MHOOK_STATUS_JUMP_CYCLE` | Entry-point jump resolution encountered an address it had already visited. | Correct the cyclic thunk chain before retrying. |
 | `MHOOK_STATUS_JUMP_DEPTH_EXCEEDED` | Entry-point jump resolution would follow more than 16 jumps. | Shorten the thunk chain before retrying. |
+| `MHOOK_STATUS_ALREADY_HOOKED` | Either the requested target or replacement resolution chain reached a target with an active hook. | Reuse or remove the existing hook before retrying. |
 
 ## Build
 

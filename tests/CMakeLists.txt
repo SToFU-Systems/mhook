@@ -18,6 +18,7 @@ set(statusCases
     invalid_set_thunk_indirect
     invalid_set_thunk_cycle
     invalid_set_thunk_depth
+    invalid_set_conflict
     invalid_set_slot_alignment
     invalid_set_slot_access
     invalid_set_slot_write
@@ -25,6 +26,7 @@ set(statusCases
     invalid_unhook_slot_alignment
     invalid_unhook_slot_access
     invalid_unhook_slot_write
+    invalid_unhook_address
     not_found
     thread_local
     success
