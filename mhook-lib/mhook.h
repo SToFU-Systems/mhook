@@ -133,10 +133,11 @@ typedef enum MHOOK_STATUS
  *        Mhook_Unhook() and Mhook_GetTarget(). Unchanged on failure.
  * @param[in]     pHookFunction    Replacement, with the same calling convention
  *        and signature as the target.
- * @return TRUE if the hook was installed.
+ * @return TRUE if the hook was installed. The caller's GetLastError value is
+ *         preserved on both success and failure.
  *
  * @note Fails if the prologue does not decode into at least five bytes of whole
- *       instructions, and does not report a reason through GetLastError().
+ *       instructions. Retrieve failure details with Mhook_GetLastStatus().
  */
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
@@ -155,8 +156,10 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
  * @param[in,out] ppHookedFunction The trampoline from Mhook_SetHook(). On
  *        success receives the original function address; unchanged on any
  *        failure, so a refused call can be retried with the same pointer.
- * @return TRUE if the original bytes were restored.
- * @retval FALSE GetLastError() is MHOOK_ERROR_TARGET_MODIFIED,
+ * @return TRUE if the original bytes were restored. On success, the caller's
+ *         GetLastError value is preserved.
+ * @retval FALSE Invalid arguments and descriptors preserve GetLastError.
+ *         Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
  *         MHOOK_ERROR_NOT_HOOKED, or the code from the failed VirtualProtect.
  *
  * @warning The trampoline is not freed, since a thread may still be running in

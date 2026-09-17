@@ -1262,9 +1262,12 @@ MHOOK_STATUS Mhook_GetLastStatus(void)
 
 //=========================================================================
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
+    const DWORD callerLastError = GetLastError();
+
     if (!ppSystemFunction || !pHookFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
@@ -1272,12 +1275,14 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
     if (!readWritablePointerSlot(ppSystemFunction, &pSystemFunction))
     {
         g_lastStatus = MHOOK_STATUS_INVALID_DESCRIPTOR;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
     if (!pSystemFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
@@ -1296,6 +1301,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
     {
         LeaveCritSec();
         g_lastStatus = operationStatus;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
@@ -1414,16 +1420,21 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	} else {
 		ODPRINTF((L"mhooks: disassembly signals %d bytes (unacceptable)", dwInstructionLength));
 	}
+
 	LeaveCritSec();
     g_lastStatus = operationStatus;
+    SetLastError(callerLastError);
     return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
 //=========================================================================
 BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
+    const DWORD callerLastError = GetLastError();
+
     if (!ppHookedFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
@@ -1431,12 +1442,14 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
     if (!readWritablePointerSlot(ppHookedFunction, &pHookedFunction))
     {
         g_lastStatus = MHOOK_STATUS_INVALID_DESCRIPTOR;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
     if (!pHookedFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        SetLastError(callerLastError);
         return FALSE;
     }
 
@@ -1495,12 +1508,14 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 		ResumeOtherThreads();
 	}
 	LeaveCritSec();
+	g_lastStatus = operationStatus;
 	// set this after leaving the critical section so nothing in between can
 	// overwrite the reason we are reporting
-	if (!bRet)
+	if (bRet)
+		SetLastError(callerLastError);
+	else
 		SetLastError(dwError);
 
-	g_lastStatus = operationStatus;
 	return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 

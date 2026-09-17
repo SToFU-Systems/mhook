@@ -26,6 +26,8 @@ Licensed under the [MIT License](LICENSE).
 
 `Mhook_SetHook` and `Mhook_Unhook` retain their Boolean results. Call `Mhook_GetLastStatus` immediately after either operation when a detailed result is needed. The status belongs to the calling thread and is replaced by its next hook or unhook operation.
 
+Successful hook operations preserve the caller's `GetLastError` value. `Mhook_SetHook` also preserves it on failure because detailed errors are reported through `Mhook_GetLastStatus`. `Mhook_Unhook` preserves it for validation failures, while failures involving an installed hook continue to report their documented legacy error through `GetLastError`. Calling through a trampoline adds no error-state changes beyond those made by the original function.
+
 `Mhook_SetHook` follows at most 16 entry-point jumps for both the target and replacement. It rejects longer chains, cycles, and addresses that cannot be read as executable code before changing hook state.
 
 | Status | Meaning | Handling |
