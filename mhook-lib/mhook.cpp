@@ -248,62 +248,82 @@ static VOID LeaveCritSec() {
 }
 
 /**
- * @brief Reads memory only when the complete range has an allowed protection.
+ * @brief Reads the longest validated memory prefix up to the requested size.
  * @param[in] source Address to read.
- * @param[out] destination Buffer receiving the bytes.
- * @param[in] size Number of bytes to read.
+ * @param[in] maximumSize Maximum number of bytes to read.
  * @param[in] protectionMask Allowed page protections.
- * @return TRUE when the complete range was validated and read.
+ * @param[out] destination Buffer receiving the bytes.
+ * @return Number of consecutive bytes validated and read.
  */
-static BOOL readMemory(const void* source, SIZE_T size, DWORD protectionMask, OUT void* destination)
+static SIZE_T readMemoryPrefix(const void* source, SIZE_T maximumSize, DWORD protectionMask, OUT void* destination)
 {
     assert(destination);
-    assert(size);
+    assert(maximumSize);
 
     const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>(source);
-    if (!sourceAddress || size > UINTPTR_MAX - sourceAddress)
-        return FALSE;
 
-    const uintptr_t endAddress = sourceAddress + size;
+    if (!sourceAddress || maximumSize > UINTPTR_MAX - sourceAddress)
+        return 0;
+
+    const uintptr_t endAddress = sourceAddress + maximumSize;
     uintptr_t currentAddress = sourceAddress;
 
-    // Validate every memory region touched by the requested range.
+    // Find the consecutive prefix covered by allowed memory regions.
     while (currentAddress < endAddress)
     {
         MEMORY_BASIC_INFORMATION memory = {};
         const SIZE_T querySize = VirtualQuery(reinterpret_cast<const void*>(currentAddress), &memory, sizeof(memory));
 
         if (querySize != sizeof(memory))
-            return FALSE;
+            break;
 
         const BOOL isCommitted = memory.State == MEM_COMMIT;
         const BOOL isGuarded = (memory.Protect & PAGE_GUARD) != 0;
         const BOOL hasAllowedProtection = (memory.Protect & protectionMask) != 0;
 
         if (!isCommitted || isGuarded || !hasAllowedProtection)
-            return FALSE;
+            break;
 
         const uintptr_t regionAddress = reinterpret_cast<uintptr_t>(memory.BaseAddress);
-        
-		if (memory.RegionSize > UINTPTR_MAX - regionAddress)
-            return FALSE;
+
+        if (regionAddress > currentAddress || memory.RegionSize > UINTPTR_MAX - regionAddress)
+            break;
 
         const uintptr_t regionEnd = regionAddress + memory.RegionSize;
-        
-		if (regionEnd <= currentAddress)
-            return FALSE;
+
+        if (regionEnd <= currentAddress)
+            break;
 
         currentAddress = regionEnd < endAddress ? regionEnd : endAddress;
     }
 
-    // Copy only after the entire range has passed validation.
+    // Copy only the prefix that passed validation.
+    const SIZE_T readableSize = currentAddress - sourceAddress;
+
+    if (!readableSize)
+        return 0;
+
     SIZE_T bytesRead = 0;
-    const BOOL readResult = ReadProcessMemory(GetCurrentProcess(), source, destination, size, &bytesRead);
+    const BOOL readResult = ReadProcessMemory(GetCurrentProcess(), source, destination, readableSize, &bytesRead);
 
-    if (!readResult || bytesRead != size)
-        return FALSE;
+    if (!readResult || bytesRead != readableSize)
+        return 0;
 
-    return TRUE;
+    return bytesRead;
+}
+
+
+/**
+ * @brief Reads memory only when the complete range has an allowed protection.
+ * @param[in] source Address to read.
+ * @param[in] size Number of bytes to read.
+ * @param[in] protectionMask Allowed page protections.
+ * @param[out] destination Buffer receiving the bytes.
+ * @return TRUE when the complete range was validated and read.
+ */
+static BOOL readMemory(const void* source, SIZE_T size, DWORD protectionMask, OUT void* destination)
+{
+    return readMemoryPrefix(source, size, protectionMask, destination) == size;
 }
 
 
@@ -1019,20 +1039,36 @@ static void FixupIPRelativeAddressing(PBYTE pbNew, PBYTE pbOriginal, MHOOKS_PATC
 #endif
 }
 
-//=========================================================================
-// Examine the machine code at the target function's entry point, and
-// skip bytes in a way that we'll always end on an instruction boundary.
-// We also detect branches and subroutine calls (as well as returns)
-// at which point disassembly must stop.
-// Finally, detect and collect information on IP-relative instructions
-// that we can patch.
-static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDATA* pdata, MHOOK_STATUS* pStatus)
+/**
+ * @brief Decodes a function prologue through complete instruction boundaries.
+ * @param[in] pFunction Function entry point represented by the decoded bytes.
+ * @param[in] dwMinLen Minimum number of complete bytes required for the patch.
+ * @param[out] pdata Collected relocation limits and RIP-relative patch data.
+ * @param[out] instructionLength Number of complete bytes decoded.
+ * @return Status describing whether the prologue can be patched.
+ */
+static MHOOK_STATUS DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, OUT MHOOKS_PATCHDATA* pdata, OUT DWORD* instructionLength)
 {
+    U8 snapshot[MHOOKS_MAX_CODE_BYTES] = {};
     DWORD dwRet = 0;
-    *pStatus = MHOOK_STATUS_DECODE_FAILED;
+    MHOOK_STATUS status = MHOOK_STATUS_INVALID_TARGET;
+
+    assert(pdata);
+    assert(instructionLength);
+
+    *instructionLength = 0;
 	pdata->nLimitDown = 0;
 	pdata->nLimitUp = 0;
 	pdata->nRipCnt = 0;
+
+    // Decode only from bytes copied out of validated executable memory.
+    const SIZE_T snapshotSize = readMemoryPrefix(pFunction, sizeof(snapshot), kReadableCodeProtectionMask, snapshot);
+
+    if (!snapshotSize)
+        return status;
+
+    status = MHOOK_STATUS_DECODE_FAILED;
+
 #ifdef _M_IX86
 	ARCHITECTURE_TYPE arch = ARCH_X86;
 #elif defined _M_X64
@@ -1040,14 +1076,35 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 #else
 	#error unsupported platform
 #endif
+
 	DISASSEMBLER dis;
-	if (InitDisassembler(&dis, arch)) {
-		INSTRUCTION* pins = NULL;
-		U8* pLoc = (U8*)pFunction;
-		DWORD dwFlags = DISASM_DECODE | DISASM_DISASSEMBLE | DISASM_ALIGNOUTPUT;
+
+	if (InitDisassembler(&dis, arch))
+	{
+		U8* pLoc = static_cast<U8*>(pFunction);
+        U8* snapshotLocation = snapshot;
+        DWORD dwFlags = DISASM_DECODE | DISASM_DISASSEMBLE | DISASM_ALIGNOUTPUT;
 
 		ODPRINTF((L"mhooks: DisassembleAndSkip: Disassembling %p", pLoc));
-		while ( (dwRet < dwMinLen) && (pins = GetInstruction(&dis, (ULONG_PTR)pLoc, pLoc, dwFlags)) ) {
+        while (dwRet < dwMinLen)
+        {
+            INSTRUCTION* pins = GetInstruction(&dis, reinterpret_cast<ULONG_PTR>(pLoc), snapshotLocation, dwFlags);
+
+            if (!pins)
+            {
+                status = MHOOK_STATUS_DECODE_FAILED;
+                break;
+            }
+
+            const SIZE_T remainingSize = snapshotSize - dwRet;
+
+            if (!pins->Length || pins->Length > remainingSize)
+            {
+                status = MHOOK_STATUS_INVALID_TARGET;
+                break;
+            }
+
+			status = MHOOK_STATUS_UNSUPPORTED_PROLOGUE;
 			ODPRINTF(("mhooks: DisassembleAndSkip: %p:(0x%2.2x) %s", pLoc, pins->Length, pins->String));
 			if (pins->Type == ITYPE_RET		) break;
 			if (pins->Type == ITYPE_BRANCH	) break;
@@ -1063,7 +1120,7 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 					(pins->Operands[1].Flags & OP_IPREL) && (pins->Operands[1].Register == AMD64_REG_RIP))
 				{
 					// rip-addressing "mov reg, [rip+imm32]"
-					ODPRINTF((L"mhooks: DisassembleAndSkip: found OP_IPREL on operand %d with displacement 0x%x (in memory: 0x%x)", 1, pins->X86.Displacement, *(PDWORD)(pLoc+3)));
+					ODPRINTF((L"mhooks: DisassembleAndSkip: found OP_IPREL on operand %d with displacement 0x%x (in memory: 0x%x)", 1, pins->X86.Displacement, *(PDWORD)(snapshotLocation+3)));
 					bProcessRip = TRUE;
 				}
 				// mov or lea to rip+imm32 from register
@@ -1072,7 +1129,7 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 					(pins->Operands[0].Flags & OP_IPREL) && (pins->Operands[0].Register == AMD64_REG_RIP))
 				{
 					// rip-addressing "mov [rip+imm32], reg"
-					ODPRINTF((L"mhooks: DisassembleAndSkip: found OP_IPREL on operand %d with displacement 0x%x (in memory: 0x%x)", 0, pins->X86.Displacement, *(PDWORD)(pLoc+3)));
+					ODPRINTF((L"mhooks: DisassembleAndSkip: found OP_IPREL on operand %d with displacement 0x%x (in memory: 0x%x)", 0, pins->X86.Displacement, *(PDWORD)(snapshotLocation+3)));
 					bProcessRip = TRUE;
 				}
 				else if ( (pins->OperandCount >= 1) && (pins->Operands[0].Flags & OP_IPREL) )
@@ -1081,7 +1138,7 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 					ODPRINTF((L"mhooks: DisassembleAndSkip: found unsupported OP_IPREL on operand %d", 0));
 					// dump instruction bytes to the debug output
 					for (DWORD i=0; i<pins->Length; i++) {
-						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, pLoc[i]));
+						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, snapshotLocation[i]));
 					}
 					break;
 				}
@@ -1091,7 +1148,7 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 					ODPRINTF((L"mhooks: DisassembleAndSkip: found unsupported OP_IPREL on operand %d", 1));
 					// dump instruction bytes to the debug output
 					for (DWORD i=0; i<pins->Length; i++) {
-						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, pLoc[i]));
+						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, snapshotLocation[i]));
 					}
 					break;
 				}
@@ -1101,7 +1158,7 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 					ODPRINTF((L"mhooks: DisassembleAndSkip: found unsupported OP_IPREL on operand %d", 2));
 					// dump instruction bytes to the debug output
 					for (DWORD i=0; i<pins->Length; i++) {
-						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, pLoc[i]));
+						ODPRINTF((L"mhooks: DisassembleAndSkip: instr byte %2.2d: 0x%2.2x", i, snapshotLocation[i]));
 					}
 					break;
 				}
@@ -1128,17 +1185,17 @@ static DWORD DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, MHOOKS_PATCHDAT
 
 			dwRet += pins->Length;
 			pLoc  += pins->Length;
+            snapshotLocation += pins->Length;
 		}
 
 		if (dwRet >= dwMinLen)
-            *pStatus = MHOOK_STATUS_SUCCESS;
-		else if (pins)
-            *pStatus = MHOOK_STATUS_UNSUPPORTED_PROLOGUE;
+            status = MHOOK_STATUS_SUCCESS;
 
 		CloseDisassembler(&dis);
 	}
 
-	return dwRet;
+    *instructionLength = dwRet;
+    return status;
 }
 
 MHOOK_STATUS Mhook_GetLastStatus(void)
@@ -1195,8 +1252,11 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	// figure out the length of the overwrite zone
 	MHOOKS_PATCHDATA patchdata = {0};
 
-	DWORD dwInstructionLength = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata, &operationStatus);
-	if (operationStatus == MHOOK_STATUS_SUCCESS) {
+	DWORD dwInstructionLength = 0;
+	operationStatus = DisassembleAndSkip(pSystemFunction, MHOOK_JMPSIZE, &patchdata, &dwInstructionLength);
+
+	if (operationStatus == MHOOK_STATUS_SUCCESS)
+	{
 		ODPRINTF((L"mhooks: Mhook_SetHook: disassembly signals %d bytes", dwInstructionLength));
 		// suspend every other thread in this process, and make sure their IP 
 		// is not in the code we're about to overwrite.

@@ -14,6 +14,7 @@ set(statusCases
     invalid_set_target_execute
     invalid_set_hook_access
     invalid_set_thunk_boundary
+    invalid_set_decode_boundary
     invalid_set_thunk_indirect
     invalid_set_thunk_cycle
     invalid_set_thunk_depth
@@ -48,14 +49,14 @@ add_executable(mhook-hook-test hook-test.cpp)
 target_link_libraries(mhook-hook-test PRIVATE mhook::mhook)
 mhook_configure_private_target(mhook-hook-test)
 
-foreach(case IN ITEMS basic trampoline restore conflict passthrough thunk short_func threads reuse sweep)
+foreach(case IN ITEMS basic trampoline restore conflict passthrough thunk snapshot_boundary short_func threads reuse sweep)
     add_test(NAME mhook.hook.${case} COMMAND mhook-hook-test ${case})
 endforeach()
 
 set_tests_properties(
     mhook.hook.basic mhook.hook.trampoline mhook.hook.restore
     mhook.hook.conflict mhook.hook.passthrough mhook.hook.thunk
-    mhook.hook.short_func
+    mhook.hook.snapshot_boundary mhook.hook.short_func
     PROPERTIES TIMEOUT 15)
 # Every hook and unhook pair costs two system wide thread snapshots inside the
 # library, and that rate, not the hook engine, sets the runtime of the bulk

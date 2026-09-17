@@ -312,6 +312,41 @@ static int caseInvalidSetThunkBoundary(void)
 
 
 /**
+ * @brief Verifies that an instruction truncated by inaccessible memory is rejected safely.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetDecodeBoundary(void)
+{
+    const uint8_t kMoveImmediateOpcode = 0xB8;
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+    const SIZE_T pageSize = systemInfo.dwPageSize;
+    const SIZE_T allocationSize = pageSize * 2;
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, allocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the truncated instruction failed");
+
+    PBYTE instruction = memory + pageSize - 1;
+    instruction[0] = kMoveImmediateOpcode;
+    const BYTE snapshot[] = { kMoveImmediateOpcode };
+    DWORD oldProtection = 0;
+    const BOOL executableResult = makeMemoryExecutable(memory, pageSize);
+    const BOOL inaccessibleResult = VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &oldProtection);
+
+    if (!executableResult || !inaccessibleResult)
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("protecting the truncated instruction failed");
+    }
+
+    const int result = expectInvalidSet(instruction, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, instruction, snapshot, sizeof(snapshot));
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
  * @brief Verifies that an inaccessible indirect thunk slot is rejected safely.
  * @return Zero on success; otherwise a test failure code.
  */
@@ -744,6 +779,7 @@ static const StatusTestCase kStatusTestCases[] = {
     { "invalid_set_target_execute", caseInvalidSetTargetExecute },
     { "invalid_set_hook_access", caseInvalidSetHookAccess },
     { "invalid_set_thunk_boundary", caseInvalidSetThunkBoundary },
+    { "invalid_set_decode_boundary", caseInvalidSetDecodeBoundary },
     { "invalid_set_thunk_indirect", caseInvalidSetThunkIndirect },
     { "invalid_set_thunk_cycle", caseInvalidSetThunkCycle },
     { "invalid_set_thunk_depth", caseInvalidSetThunkDepth },

@@ -391,6 +391,55 @@ static int CaseThunk(void)
     return 0;
 }
 
+/**
+ * @brief Verifies that a complete prologue at an executable-page boundary remains hookable.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int CaseSnapshotBoundary(void)
+{
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+    const SIZE_T pageSize = systemInfo.dwPageSize;
+    const SIZE_T allocationSize = pageSize * 2;
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, allocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the boundary prologue failed");
+
+    PBYTE target = memory + pageSize - sizeof(kMovEaxRet);
+    memcpy(target, kMovEaxRet, sizeof(kMovEaxRet));
+    DWORD oldProtection = 0;
+    const BOOL executableResult = VirtualProtect(memory, pageSize, PAGE_EXECUTE_READ, &oldProtection);
+    const BOOL inaccessibleResult = VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &oldProtection);
+    const BOOL flushResult = FlushInstructionCache(GetCurrentProcess(), target, sizeof(kMovEaxRet));
+
+    if (!executableResult || !inaccessibleResult || !flushResult)
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("protecting the boundary prologue failed");
+    }
+
+    g_hookCalls = 0;
+    PVOID trampoline = target;
+    const BOOL hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+    const int hookedValue = hookResult ? (reinterpret_cast<TargetFn>(target))() : 0;
+    const LONG hookCalls = g_hookCalls;
+    const BOOL unhookResult = hookResult && Mhook_Unhook(&trampoline);
+    const int restoredValue = unhookResult ? (reinterpret_cast<TargetFn>(target))() : 0;
+    VirtualFree(memory, 0, MEM_RELEASE);
+
+    if (!hookResult)
+        return Fail("Mhook_SetHook rejected a complete boundary prologue");
+    if (hookedValue != HOOK_RESULT || hookCalls != 1)
+        return Fail("the boundary prologue did not reach the hook");
+    if (!unhookResult)
+        return Fail("Mhook_Unhook failed for the boundary prologue");
+    if (restoredValue != TARGET_RESULT)
+        return Fail("the boundary prologue was not restored");
+
+    return 0;
+}
+
 static const BYTE kRetOnly[] = { 0xC3 };
 
 static int CaseShortFunc(void)
@@ -641,6 +690,7 @@ static const TestCase kCases[] = {
     { "conflict", CaseConflict },
     { "passthrough", CasePassthrough },
     { "thunk", CaseThunk },
+    { "snapshot_boundary", CaseSnapshotBoundary },
     { "short_func", CaseShortFunc },
     { "threads", CaseThreads },
     { "reuse", CaseReuse },

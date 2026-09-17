@@ -37,6 +37,33 @@ static bool CheckInstruction(ARCHITECTURE_TYPE architecture, U8* bytes,
     return valid;
 }
 
+
+/**
+ * @brief Verifies that decoding from copied bytes preserves their represented virtual address.
+ * @return True when a RIP-relative target is calculated from the virtual address.
+ */
+static bool CheckSnapshotVirtualAddress(void)
+{
+    const U64 kVirtualAddress = 0x10000000;
+    const U64 kExpectedTargetAddress = 0x10000010;
+    U8 bytes[32] = { 0x48, 0x8B, 0x05, 0x09, 0x00, 0x00, 0x00 };
+    DISASSEMBLER decoder = {};
+    if (!InitDisassembler(&decoder, ARCH_X64))
+    {
+        fprintf(stderr, "Decoder initialization failed for snapshot address test\n");
+        return false;
+    }
+
+    INSTRUCTION* instruction = GetInstruction(&decoder, kVirtualAddress, bytes, DISASM_DECODE | DISASM_SUPPRESSERRORS);
+    const U64 targetAddress = instruction ? instruction->Operands[1].TargetAddress + instruction->VirtualAddressDelta : 0;
+    const bool valid = instruction && !instruction->ErrorOccurred && instruction->Length == 7 && instruction->Type == ITYPE_MOV && targetAddress == kExpectedTargetAddress;
+    if (!valid)
+        fprintf(stderr, "Snapshot decoding did not preserve the original virtual address\n");
+
+    CloseDisassembler(&decoder);
+    return valid;
+}
+
 int main()
 {
     if (!set_hook || !remove_hook) {
@@ -54,6 +81,8 @@ int main()
             return 1;
         }
     }
+    if (!CheckSnapshotVirtualAddress())
+        return 1;
     puts("Archive linkage and x86/x64 decoder checks passed.");
     return 0;
 }
