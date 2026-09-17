@@ -30,6 +30,7 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,49 @@ static thread_local MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
 
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
+
+
+/**
+ * @brief Validates and reads a caller-owned function-pointer slot.
+ * @param[in] slot Pointer slot supplied to a public hook operation.
+ * @param[out] value Function pointer read from the slot.
+ * @return TRUE when the slot is aligned, committed, readable, and writable.
+ */
+static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
+{
+	assert(slot);
+	assert(value);
+
+    const SIZE_T kPointerSize = sizeof(PVOID);
+    const DWORD kWritableProtectionMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    const ULONG_PTR slotAddress = reinterpret_cast<ULONG_PTR>(slot);
+    const BOOL isAligned = slotAddress % alignof(PVOID) == 0;
+    
+	if (!isAligned)
+        return FALSE;
+
+    MEMORY_BASIC_INFORMATION memory = {};
+    const SIZE_T querySize = VirtualQuery(slot, &memory, sizeof(memory));
+
+    if (querySize != sizeof(memory))
+        return FALSE;
+
+    const BOOL isCommitted = memory.State == MEM_COMMIT;
+    const BOOL isGuarded = (memory.Protect & PAGE_GUARD) != 0;
+    const BOOL isWritable = (memory.Protect & kWritableProtectionMask) != 0;
+
+    if (!isCommitted || isGuarded || !isWritable)
+        return FALSE;
+
+    SIZE_T bytesRead = 0;
+    const BOOL readResult = ReadProcessMemory(GetCurrentProcess(), slot, value, kPointerSize, &bytesRead);
+
+    if (!readResult || bytesRead != kPointerSize)
+        return FALSE;
+
+    return TRUE;
+}
 
 //=========================================================================
 // Toolhelp defintions so the functions can be dynamically bound to
@@ -801,14 +845,26 @@ MHOOK_STATUS Mhook_GetLastStatus(void)
 
 //=========================================================================
 BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
-    if (!ppSystemFunction || !*ppSystemFunction || !pHookFunction)
+    if (!ppSystemFunction || !pHookFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
+    PVOID pSystemFunction = NULL;
+    if (!readWritablePointerSlot(ppSystemFunction, &pSystemFunction))
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_DESCRIPTOR;
+        return FALSE;
+    }
+
+    if (!pSystemFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
         return FALSE;
     }
 
 	MHOOKS_TRAMPOLINE* pTrampoline = NULL;
-	PVOID pSystemFunction = *ppSystemFunction;
     MHOOK_STATUS operationStatus = MHOOK_STATUS_SUCCESS;
 
 	// ensure thread-safety
@@ -933,20 +989,33 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 
 //=========================================================================
 BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
-    if (!ppHookedFunction || !*ppHookedFunction)
+    if (!ppHookedFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
         return FALSE;
     }
 
-	ODPRINTF((L"mhooks: Mhook_Unhook: %p", *ppHookedFunction));
+    PVOID pHookedFunction = NULL;
+    if (!readWritablePointerSlot(ppHookedFunction, &pHookedFunction))
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_DESCRIPTOR;
+        return FALSE;
+    }
+
+    if (!pHookedFunction)
+    {
+        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
+        return FALSE;
+    }
+
+	ODPRINTF((L"mhooks: Mhook_Unhook: %p", pHookedFunction));
 	BOOL bRet = FALSE;
 	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
 	MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
 
 	EnterCritSec();
 	// get the trampoline structure that corresponds to our function
-	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)*ppHookedFunction);
+	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
 	if (pTrampoline) {
 		// make sure nobody's executing code where we're about to overwrite a few bytes
 		SuspendOtherThreads(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);

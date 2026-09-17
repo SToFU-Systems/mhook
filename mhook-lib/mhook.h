@@ -87,7 +87,10 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_PATCH_FAILED = 8,
 
     /** Another writer modified the target after the hook was installed. */
-    MHOOK_STATUS_TARGET_MODIFIED = 9
+    MHOOK_STATUS_TARGET_MODIFIED = 9,
+
+    /** The caller's function-pointer slot is misaligned or inaccessible. */
+    MHOOK_STATUS_INVALID_DESCRIPTOR = 10
 } MHOOK_STATUS;
 
 

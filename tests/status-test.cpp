@@ -39,6 +39,309 @@ static int HookReplacement(void)
     return 1337;
 }
 
+
+/**
+ * @brief Allocates a deterministic executable target for descriptor tests.
+ * @return The target buffer, or NULL when allocation fails.
+ */
+static PBYTE allocateTarget(void)
+{
+    PBYTE target = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+
+    if (!target)
+        return NULL;
+
+    memset(target, 0xCC, kTargetBufferSize);
+    memcpy(target, kMovEaxRet, sizeof(kMovEaxRet));
+    const BOOL flushResult = FlushInstructionCache(GetCurrentProcess(), target, kTargetBufferSize);
+    if (!flushResult)
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return NULL;
+    }
+
+    return target;
+}
+
+
+/**
+ * @brief Stores a pointer in storage that may not satisfy pointer alignment.
+ * @param[out] destination Storage receiving the pointer bytes.
+ * @param[in] value Pointer value to store.
+ */
+static void storePointer(OUT void* destination, PVOID value)
+{
+    memcpy(destination, &value, sizeof(value));
+}
+
+
+/**
+ * @brief Loads a pointer from storage that may not satisfy pointer alignment.
+ * @param[in] source Storage containing the pointer bytes.
+ * @return The stored pointer.
+ */
+static PVOID loadPointer(const void* source)
+{
+    PVOID value = NULL;
+
+    memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+
+/**
+ * @brief Verifies that Mhook_SetHook rejects a misaligned pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetSlotAlignment(void)
+{
+    alignas(PVOID) BYTE storage[sizeof(PVOID) + 1] = {};
+    PVOID* slot = reinterpret_cast<PVOID*>(storage + 1);
+    PBYTE target = allocateTarget();
+
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+    storePointer(slot, target);
+
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const PVOID storedPointer = loadPointer(slot);
+
+    if (result)
+    {
+        PVOID trampoline = storedPointer;
+        Mhook_Unhook(&trampoline);
+    }
+
+    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
+    const BOOL slotChanged = storedPointer != target;
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_SetHook accepted a misaligned system-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("a misaligned system-function slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected misaligned system-function slot was modified");
+    if (targetChanged)
+        return Fail("a rejected misaligned system-function slot modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_SetHook rejects an inaccessible pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetSlotAccess(void)
+{
+    PVOID* slot = static_cast<PVOID*>(VirtualAlloc(NULL, sizeof(PVOID), MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+
+    if (!slot)
+        return Fail("VirtualAlloc for the inaccessible slot failed");
+
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    VirtualFree(slot, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_SetHook accepted an inaccessible system-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("an inaccessible system-function slot did not report INVALID_DESCRIPTOR");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_SetHook rejects a read-only pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetSlotWrite(void)
+{
+    PBYTE target = allocateTarget();
+    PVOID* slot = static_cast<PVOID*>(VirtualAlloc(NULL, sizeof(PVOID), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!target || !slot)
+    {
+        if (slot)
+            VirtualFree(slot, 0, MEM_RELEASE);
+        if (target)
+            VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualAlloc for the read-only slot test failed");
+    }
+
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+    *slot = target;
+    DWORD oldProtection = 0;
+    const BOOL protectedSlot = VirtualProtect(slot, sizeof(PVOID), PAGE_READONLY, &oldProtection);
+
+    if (!protectedSlot)
+    {
+        VirtualFree(slot, 0, MEM_RELEASE);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualProtect for the read-only slot failed");
+    }
+
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
+    const BOOL slotChanged = loadPointer(slot) != target;
+    VirtualFree(slot, 0, MEM_RELEASE);
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_SetHook accepted a read-only system-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("a read-only system-function slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected read-only system-function slot was modified");
+    if (targetChanged)
+        return Fail("a rejected read-only system-function slot modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_Unhook rejects a misaligned pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidUnhookSlotAlignment(void)
+{
+    alignas(PVOID) BYTE storage[sizeof(PVOID) + 1] = {};
+    PVOID* slot = reinterpret_cast<PVOID*>(storage + 1);
+    PBYTE target = allocateTarget();
+
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookReplacement)))
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_SetHook failed while preparing the misaligned unhook test");
+    }
+
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+    storePointer(slot, trampoline);
+    const PVOID expectedPointer = trampoline;
+
+    const BOOL result = Mhook_Unhook(slot);
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const PVOID storedPointer = loadPointer(slot);
+    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
+    const BOOL slotChanged = storedPointer != expectedPointer;
+
+    if (!result)
+        Mhook_Unhook(&trampoline);
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_Unhook accepted a misaligned hooked-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("a misaligned hooked-function slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected misaligned hooked-function slot was modified");
+    if (targetChanged)
+        return Fail("a rejected misaligned hooked-function slot modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_Unhook rejects an inaccessible pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidUnhookSlotAccess(void)
+{
+    PVOID* slot = static_cast<PVOID*>(VirtualAlloc(NULL, sizeof(PVOID), MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+
+    if (!slot)
+        return Fail("VirtualAlloc for the inaccessible slot failed");
+
+    const BOOL result = Mhook_Unhook(slot);
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    VirtualFree(slot, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_Unhook accepted an inaccessible hooked-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("an inaccessible hooked-function slot did not report INVALID_DESCRIPTOR");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_Unhook rejects a read-only pointer slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidUnhookSlotWrite(void)
+{
+    PBYTE target = allocateTarget();
+    PVOID* slot = static_cast<PVOID*>(VirtualAlloc(NULL, sizeof(PVOID), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!target || !slot)
+    {
+        if (slot)
+            VirtualFree(slot, 0, MEM_RELEASE);
+        if (target)
+            VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualAlloc for the read-only unhook slot test failed");
+    }
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookReplacement)))
+    {
+        VirtualFree(slot, 0, MEM_RELEASE);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_SetHook failed while preparing the read-only unhook test");
+    }
+
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+    *slot = trampoline;
+    DWORD oldProtection = 0;
+    const BOOL protectedSlot = VirtualProtect(slot, sizeof(PVOID), PAGE_READONLY, &oldProtection);
+
+    if (!protectedSlot)
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(slot, 0, MEM_RELEASE);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualProtect for the read-only unhook slot failed");
+    }
+
+    const BOOL result = Mhook_Unhook(slot);
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
+    const BOOL slotChanged = loadPointer(slot) != trampoline;
+
+    if (!result)
+        Mhook_Unhook(&trampoline);
+    VirtualFree(slot, 0, MEM_RELEASE);
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (result)
+        return Fail("Mhook_Unhook accepted a read-only hooked-function slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("a read-only hooked-function slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected read-only hooked-function slot was modified");
+    if (targetChanged)
+        return Fail("a rejected read-only hooked-function slot modified target code");
+
+    return 0;
+}
+
 static int CaseInitial(void)
 {
     if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
@@ -177,7 +480,13 @@ struct StatusTestCase
 static const StatusTestCase kStatusTestCases[] = {
     { "initial", CaseInitial },
     { "invalid_set", CaseInvalidSet },
+    { "invalid_set_slot_alignment", caseInvalidSetSlotAlignment },
+    { "invalid_set_slot_access", caseInvalidSetSlotAccess },
+    { "invalid_set_slot_write", caseInvalidSetSlotWrite },
     { "invalid_unhook", CaseInvalidUnhook },
+    { "invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment },
+    { "invalid_unhook_slot_access", caseInvalidUnhookSlotAccess },
+    { "invalid_unhook_slot_write", caseInvalidUnhookSlotWrite },
     { "not_found", CaseNotFound },
     { "thread_local", CaseThreadLocal },
     { "success", CaseSuccess }
