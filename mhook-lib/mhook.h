@@ -89,8 +89,17 @@ typedef enum MHOOK_STATUS
     /** Another writer modified the target after the hook was installed. */
     MHOOK_STATUS_TARGET_MODIFIED = 9,
 
-    /** The caller's function-pointer slot is misaligned or inaccessible. */
-    MHOOK_STATUS_INVALID_DESCRIPTOR = 10
+    /** The caller's function-pointer slot is misaligned, unreadable, or unwritable. */
+    MHOOK_STATUS_INVALID_DESCRIPTOR = 10,
+
+    /** Executable code or an indirect jump's pointer slot cannot be read. */
+    MHOOK_STATUS_INVALID_TARGET = 11,
+
+    /** Following entry-point jumps encountered an address already visited. */
+    MHOOK_STATUS_JUMP_CYCLE = 12,
+
+    /** Following entry-point jumps exceeded the supported depth. */
+    MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13
 } MHOOK_STATUS;
 
 
@@ -111,8 +120,9 @@ typedef enum MHOOK_STATUS
 /**
  * @brief Installs a hook, redirecting a function to a replacement.
  *
- * Both addresses are followed through jump thunks first, so hooking an import
- * stub hooks the function behind it.
+ * Both addresses are followed through up to 16 jump thunks first, so hooking
+ * an import stub hooks the function behind it. Longer or cyclic chains are
+ * rejected.
  *
  * @param[in,out] ppSystemFunction On entry the function to hook. On success,
  *        receives the trampoline: call it to reach the original, and pass it to

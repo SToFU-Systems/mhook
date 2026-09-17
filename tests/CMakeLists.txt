@@ -7,7 +7,28 @@ set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
 add_executable(mhook-status-test status-test.cpp)
 target_link_libraries(mhook-status-test PRIVATE mhook::mhook)
 mhook_configure_private_target(mhook-status-test)
-foreach(case IN ITEMS initial invalid_set invalid_set_slot_alignment invalid_set_slot_access invalid_set_slot_write invalid_unhook invalid_unhook_slot_alignment invalid_unhook_slot_access invalid_unhook_slot_write not_found thread_local success)
+set(statusCases
+    initial
+    invalid_set
+    invalid_set_target_access
+    invalid_set_target_execute
+    invalid_set_hook_access
+    invalid_set_thunk_boundary
+    invalid_set_thunk_indirect
+    invalid_set_thunk_cycle
+    invalid_set_thunk_depth
+    invalid_set_slot_alignment
+    invalid_set_slot_access
+    invalid_set_slot_write
+    invalid_unhook
+    invalid_unhook_slot_alignment
+    invalid_unhook_slot_access
+    invalid_unhook_slot_write
+    not_found
+    thread_local
+    success
+)
+foreach(case IN LISTS statusCases)
     add_test(NAME mhook.status.${case} COMMAND mhook-status-test ${case})
     set_tests_properties(mhook.status.${case} PROPERTIES TIMEOUT 15)
 endforeach()

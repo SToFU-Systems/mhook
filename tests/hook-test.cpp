@@ -9,6 +9,7 @@
 //================================================================================
 
 #include <windows.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "mhook-lib/mhook.h"
@@ -260,38 +261,133 @@ static int CasePassthrough(void)
 
 static int CaseThunk(void)
 {
-    PBYTE page = (PBYTE)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    const SIZE_T kPageSize = 4096;
+    const SIZE_T kThunkCount = 16;
+    const SIZE_T kThunkStride = 16;
+    const SIZE_T kShortJumpIndex = 1;
+    const SIZE_T kPointerSlotOffset = 320;
+    const SIZE_T kTargetOffset = 384;
+    const SIZE_T kNearJumpSize = 5;
+    const SIZE_T kShortJumpSize = 2;
+    const SIZE_T kIndirectJumpSize = 6;
+    const SIZE_T kSnapshotSize = kThunkCount * kThunkStride;
+#ifdef _M_IX86
+    const SIZE_T kDirectThunkCount = 15;
+#elif defined _M_X64
+    const SIZE_T kDirectThunkCount = 14;
+    const SIZE_T kSecondPointerSlotOffset = 336;
+    const SIZE_T kRexIndirectJumpSize = 7;
+#else // !_M_IX86 && !_M_X64
+#error unsupported platform
+#endif // _M_IX86 || _M_X64
+
+    PBYTE page = static_cast<PBYTE>(VirtualAlloc(NULL, kPageSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!page)
         return Fail("VirtualAlloc for the thunk page failed");
-    memset(page, 0xCC, 4096);
+    memset(page, 0xCC, kPageSize);
 
-    PBYTE thunk = page;
-    PBYTE target = page + 128;
+    PBYTE firstThunk = page;
+    PBYTE indirectThunk = page + kDirectThunkCount * kThunkStride;
+    PBYTE pointerSlot = page + kPointerSlotOffset;
+    PBYTE target = page + kTargetOffset;
+#ifdef _M_X64
+    PBYTE secondPointerSlot = page + kSecondPointerSlotOffset;
+#endif // _M_X64
     memcpy(target, kMovEaxRet, sizeof(kMovEaxRet));
-    thunk[0] = 0xE9;
-    *(DWORD*)(thunk + 1) = (DWORD)(target - (thunk + 5));
-    FlushInstructionCache(GetCurrentProcess(), page, 4096);
 
-    BYTE thunkSnapshot[8];
-    memcpy(thunkSnapshot, thunk, sizeof(thunkSnapshot));
+    // Mix every relative jump form with the x86 entry prefixes.
+    for (SIZE_T index = 0; index < kDirectThunkCount; ++index)
+    {
+        PBYTE thunk = page + index * kThunkStride;
+        PBYTE instruction = thunk;
+        PBYTE nextThunk = page + (index + 1) * kThunkStride;
+#ifdef _M_IX86
+        if (index == 0)
+        {
+            instruction[0] = 0x8B;
+            instruction[1] = 0xFF;
+            instruction += 2;
+        }
+        else if (index == 1)
+        {
+            instruction[0] = 0x55;
+            instruction[1] = 0x8B;
+            instruction[2] = 0xEC;
+            instruction[3] = 0x5D;
+            instruction += 4;
+        }
+#endif // _M_IX86
 
-    if (((TargetFn)thunk)() != TARGET_RESULT)
-        return Fail("the thunk does not reach the target before hooking");
+        if (index == kShortJumpIndex)
+        {
+            const int8_t offset = static_cast<int8_t>(nextThunk - (instruction + kShortJumpSize));
+            instruction[0] = 0xEB;
+            memcpy(instruction + 1, &offset, sizeof(offset));
+        }
+        else
+        {
+            const int32_t offset = static_cast<int32_t>(nextThunk - (instruction + kNearJumpSize));
+            instruction[0] = 0xE9;
+            memcpy(instruction + 1, &offset, sizeof(offset));
+        }
+    }
+
+    // End the chain through each architecture's supported indirect forms.
+    indirectThunk[0] = 0xFF;
+    indirectThunk[1] = 0x25;
+#ifdef _M_IX86
+    const uint32_t slotAddress = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pointerSlot));
+    memcpy(indirectThunk + 2, &slotAddress, sizeof(slotAddress));
+#elif defined _M_X64
+    const int32_t slotOffset = static_cast<int32_t>(pointerSlot - (indirectThunk + kIndirectJumpSize));
+    memcpy(indirectThunk + 2, &slotOffset, sizeof(slotOffset));
+
+    PBYTE rexIndirectThunk = indirectThunk + kThunkStride;
+    rexIndirectThunk[0] = 0x48;
+    rexIndirectThunk[1] = 0xFF;
+    rexIndirectThunk[2] = 0x25;
+    const int32_t secondSlotOffset = static_cast<int32_t>(secondPointerSlot - (rexIndirectThunk + kRexIndirectJumpSize));
+    memcpy(rexIndirectThunk + 3, &secondSlotOffset, sizeof(secondSlotOffset));
+    memcpy(pointerSlot, &rexIndirectThunk, sizeof(rexIndirectThunk));
+    memcpy(secondPointerSlot, &target, sizeof(target));
+#else // !_M_IX86 && !_M_X64
+#error unsupported platform
+#endif // _M_IX86 || _M_X64
+#ifdef _M_IX86
+    memcpy(pointerSlot, &target, sizeof(target));
+#endif // _M_IX86
+
+    if (!FlushInstructionCache(GetCurrentProcess(), page, kPageSize))
+    {
+        VirtualFree(page, 0, MEM_RELEASE);
+        return Fail("FlushInstructionCache failed for the thunk chain");
+    }
+
+    BYTE thunkSnapshot[kSnapshotSize] = {};
+    memcpy(thunkSnapshot, firstThunk, sizeof(thunkSnapshot));
+
+    if ((reinterpret_cast<TargetFn>(firstThunk))() != TARGET_RESULT)
+        return Fail("the thunk chain does not reach the target before hooking");
 
     g_hookCalls = 0;
-    PVOID trampoline = thunk;
-    if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
-        return Fail("Mhook_SetHook failed on a target behind a thunk");
-    if (memcmp(thunk, thunkSnapshot, sizeof(thunkSnapshot)) != 0)
-        return Fail("SkipJumps patched the thunk instead of the final target");
+    PVOID trampoline = firstThunk;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed on a target behind a thunk chain");
+    if (memcmp(firstThunk, thunkSnapshot, sizeof(thunkSnapshot)) != 0)
+        return Fail("jump resolution patched a thunk instead of the final target");
     if (!IsJumpPatched(target))
         return Fail("the final target was not patched");
-    if (((TargetFn)thunk)() != HOOK_RESULT)
-        return Fail("calling through the thunk did not reach the hook");
+    if ((reinterpret_cast<TargetFn>(firstThunk))() != HOOK_RESULT)
+        return Fail("calling through the thunk chain did not reach the hook");
     if (g_hookCalls != 1)
         return Fail("the hook ran a number of times other than once");
 
-    Mhook_Unhook(&trampoline);
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed for the thunk chain");
+    if ((reinterpret_cast<TargetFn>(firstThunk))() != TARGET_RESULT)
+        return Fail("the thunk chain does not reach the restored target");
+
+    VirtualFree(page, 0, MEM_RELEASE);
     return 0;
 }
 
@@ -402,7 +498,7 @@ static int CaseReuse(void)
     return 0;
 }
 
-// Mirrors the patterns SkipJumps follows, without following them.
+// Mirrors the patterns the entry-point resolver follows, without following them.
 static bool PrologueJumpsElsewhere(const BYTE* code)
 {
 #ifdef _M_IX86

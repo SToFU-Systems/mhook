@@ -31,6 +31,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,48 +168,9 @@ static thread_local MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
 
-
-/**
- * @brief Validates and reads a caller-owned function-pointer slot.
- * @param[in] slot Pointer slot supplied to a public hook operation.
- * @param[out] value Function pointer read from the slot.
- * @return TRUE when the slot is aligned, committed, readable, and writable.
- */
-static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
-{
-	assert(slot);
-	assert(value);
-
-    const SIZE_T kPointerSize = sizeof(PVOID);
-    const DWORD kWritableProtectionMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-
-    const ULONG_PTR slotAddress = reinterpret_cast<ULONG_PTR>(slot);
-    const BOOL isAligned = slotAddress % alignof(PVOID) == 0;
-    
-	if (!isAligned)
-        return FALSE;
-
-    MEMORY_BASIC_INFORMATION memory = {};
-    const SIZE_T querySize = VirtualQuery(slot, &memory, sizeof(memory));
-
-    if (querySize != sizeof(memory))
-        return FALSE;
-
-    const BOOL isCommitted = memory.State == MEM_COMMIT;
-    const BOOL isGuarded = (memory.Protect & PAGE_GUARD) != 0;
-    const BOOL isWritable = (memory.Protect & kWritableProtectionMask) != 0;
-
-    if (!isCommitted || isGuarded || !isWritable)
-        return FALSE;
-
-    SIZE_T bytesRead = 0;
-    const BOOL readResult = ReadProcessMemory(GetCurrentProcess(), slot, value, kPointerSize, &bytesRead);
-
-    if (!readResult || bytesRead != kPointerSize)
-        return FALSE;
-
-    return TRUE;
-}
+static constexpr DWORD kReadableCodeProtectionMask = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+static constexpr DWORD kReadableProtectionMask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | kReadableCodeProtectionMask;
+static constexpr DWORD kWritableProtectionMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 
 //=========================================================================
 // Toolhelp defintions so the functions can be dynamically bound to
@@ -285,53 +247,394 @@ static VOID LeaveCritSec() {
 	LeaveCriticalSection(&g_cs);
 }
 
-//=========================================================================
-// Internal function:
-// 
-// Skip over jumps that lead to the real function. Gets around import
-// jump tables, etc.
-//=========================================================================
-static PBYTE SkipJumps(PBYTE pbCode) {
-	PBYTE pbOrgCode = pbCode;
-#ifdef _M_IX86_X64
+/**
+ * @brief Reads memory only when the complete range has an allowed protection.
+ * @param[in] source Address to read.
+ * @param[out] destination Buffer receiving the bytes.
+ * @param[in] size Number of bytes to read.
+ * @param[in] protectionMask Allowed page protections.
+ * @return TRUE when the complete range was validated and read.
+ */
+static BOOL readMemory(const void* source, SIZE_T size, DWORD protectionMask, OUT void* destination)
+{
+    assert(destination);
+    assert(size);
+
+    const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>(source);
+    if (!sourceAddress || size > UINTPTR_MAX - sourceAddress)
+        return FALSE;
+
+    const uintptr_t endAddress = sourceAddress + size;
+    uintptr_t currentAddress = sourceAddress;
+
+    // Validate every memory region touched by the requested range.
+    while (currentAddress < endAddress)
+    {
+        MEMORY_BASIC_INFORMATION memory = {};
+        const SIZE_T querySize = VirtualQuery(reinterpret_cast<const void*>(currentAddress), &memory, sizeof(memory));
+
+        if (querySize != sizeof(memory))
+            return FALSE;
+
+        const BOOL isCommitted = memory.State == MEM_COMMIT;
+        const BOOL isGuarded = (memory.Protect & PAGE_GUARD) != 0;
+        const BOOL hasAllowedProtection = (memory.Protect & protectionMask) != 0;
+
+        if (!isCommitted || isGuarded || !hasAllowedProtection)
+            return FALSE;
+
+        const uintptr_t regionAddress = reinterpret_cast<uintptr_t>(memory.BaseAddress);
+        
+		if (memory.RegionSize > UINTPTR_MAX - regionAddress)
+            return FALSE;
+
+        const uintptr_t regionEnd = regionAddress + memory.RegionSize;
+        
+		if (regionEnd <= currentAddress)
+            return FALSE;
+
+        currentAddress = regionEnd < endAddress ? regionEnd : endAddress;
+    }
+
+    // Copy only after the entire range has passed validation.
+    SIZE_T bytesRead = 0;
+    const BOOL readResult = ReadProcessMemory(GetCurrentProcess(), source, destination, size, &bytesRead);
+
+    if (!readResult || bytesRead != size)
+        return FALSE;
+
+    return TRUE;
+}
+
+
+/**
+ * @brief Validates and reads a caller-owned function-pointer slot.
+ * @param[in] slot Pointer slot supplied to a public hook operation.
+ * @param[out] value Function pointer read from the slot.
+ * @return TRUE when the slot is aligned, committed, readable, and writable.
+ */
+static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
+{
+    assert(slot);
+    assert(value);
+
+    const uintptr_t slotAddress = reinterpret_cast<uintptr_t>(slot);
+    const BOOL isAligned = slotAddress % alignof(PVOID) == 0;
+
+    if (!isAligned)
+        return FALSE;
+
+    return readMemory(slot, sizeof(*slot), kWritableProtectionMask, value);
+}
+
+
+/**
+ * @brief Calculates a checked address relative to the end of an instruction.
+ * @param[in] instruction Address of the instruction.
+ * @param[in] instructionSize Encoded instruction size.
+ * @param[in] displacement Signed displacement from the instruction end.
+ * @param[out] address Calculated non-null address.
+ * @return TRUE when the address calculation does not overflow or underflow.
+ */
+static BOOL calculateRelativeAddress(PBYTE instruction, SIZE_T instructionSize, int32_t displacement, OUT PBYTE* address)
+{
+    assert(instruction);
+    assert(address);
+
+    const uintptr_t instructionAddress = reinterpret_cast<uintptr_t>(instruction);
+    const int64_t signedDisplacement = displacement;
+
+    if (instructionSize > UINTPTR_MAX - instructionAddress)
+        return FALSE;
+
+    uintptr_t resultAddress = instructionAddress + instructionSize;
+
+    if (signedDisplacement < 0)
+    {
+        const uint64_t magnitude = static_cast<uint64_t>(-signedDisplacement);
+
+        if (magnitude > resultAddress)
+            return FALSE;
+
+        resultAddress -= static_cast<uintptr_t>(magnitude);
+    }
+    else
+    {
+        const uint64_t magnitude = static_cast<uint64_t>(signedDisplacement);
+
+        if (magnitude > UINTPTR_MAX - resultAddress)
+            return FALSE;
+
+        resultAddress += static_cast<uintptr_t>(magnitude);
+    }
+
+    if (!resultAddress)
+        return FALSE;
+
+    *address = reinterpret_cast<PBYTE>(resultAddress);
+    return TRUE;
+}
+
+
+/**
+ * @brief Resolves a supported indirect entry-point jump.
+ * @param[in] instruction Address of the jump instruction.
+ * @param[in] hasRexPrefix Whether the x64 REX prefix was detected.
+ * @param[out] nextFunction Jump destination, or NULL when the instruction is not a supported indirect jump.
+ * @return Success or a validation failure.
+ */
+static MHOOK_STATUS resolveIndirectJump(PBYTE instruction, BOOL hasRexPrefix, OUT PBYTE* nextFunction)
+{
+	assert(instruction);
+	assert(nextFunction);
+
+    const uint8_t kIndirectJumpOperand = 0x25;
+    const SIZE_T kIndirectOpcodeSize = 2;
+    const SIZE_T kIndirectJumpSize = 6;
+    const SIZE_T kIndirectDisplacementOffset = 2;
+    const SIZE_T kMaximumJumpSize = 7;
+
+#ifdef _M_X64
+    const uint8_t kIndirectJumpOpcode = 0xFF;
+    const SIZE_T kRexOpcodeSize = 3;
+    const SIZE_T kRexIndirectJumpSize = 7;
+    const SIZE_T kRexIndirectDisplacementOffset = 3;
+#endif // _M_X64
+
+    SIZE_T jumpSize = kIndirectJumpSize;
+    SIZE_T displacementOffset = kIndirectDisplacementOffset;
+    uint8_t code[kMaximumJumpSize] = {};
+
+    if (!hasRexPrefix)
+    {
+        if (!readMemory(instruction, kIndirectOpcodeSize, kReadableCodeProtectionMask, code))
+            return MHOOK_STATUS_INVALID_TARGET;
+
+        if (code[1] != kIndirectJumpOperand)
+            return MHOOK_STATUS_SUCCESS;
+    }
+#ifdef _M_X64
+    else
+    {
+        if (!readMemory(instruction, kIndirectOpcodeSize, kReadableCodeProtectionMask, code))
+            return MHOOK_STATUS_INVALID_TARGET;
+
+        if (code[1] != kIndirectJumpOpcode)
+            return MHOOK_STATUS_SUCCESS;
+
+        if (!readMemory(instruction, kRexOpcodeSize, kReadableCodeProtectionMask, code))
+            return MHOOK_STATUS_INVALID_TARGET;
+
+        if (code[2] != kIndirectJumpOperand)
+            return MHOOK_STATUS_SUCCESS;
+
+        jumpSize = kRexIndirectJumpSize;
+        displacementOffset = kRexIndirectDisplacementOffset;
+    }
+#else // !_M_X64
+    else
+        return MHOOK_STATUS_INVALID_TARGET;
+#endif // _M_X64
+
+    if (!readMemory(instruction, jumpSize, kReadableCodeProtectionMask, code))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    PBYTE pointerSlot = NULL;
+
 #ifdef _M_IX86
-	//mov edi,edi: hot patch point
-	if (pbCode[0] == 0x8b && pbCode[1] == 0xff)
-		pbCode += 2;
-	// push ebp; mov ebp, esp; pop ebp;
-	// "collapsed" stackframe generated by MSVC
-	if (pbCode[0] == 0x55 && pbCode[1] == 0x8b && pbCode[2] == 0xec && pbCode[3] == 0x5d)
-		pbCode += 4;
-#endif	
-	if (pbCode[0] == 0xff && pbCode[1] == 0x25) {
-#ifdef _M_IX86
-		// on x86 we have an absolute pointer...
-		PBYTE pbTarget = *(PBYTE *)&pbCode[2];
-		// ... that shows us an absolute pointer.
-		return SkipJumps(*(PBYTE *)pbTarget);
+    uint32_t slotAddress = 0;
+    memcpy(&slotAddress, code + displacementOffset, sizeof(slotAddress));
+    pointerSlot = reinterpret_cast<PBYTE>(static_cast<uintptr_t>(slotAddress));
 #elif defined _M_X64
-		// on x64 we have a 32-bit offset...
-		INT32 lOffset = *(INT32 *)&pbCode[2];
-		// ... that shows us an absolute pointer
-		return SkipJumps(*(PBYTE*)(pbCode + 6 + lOffset));
-	} else if (pbCode[0] == 0x48 && pbCode[1] == 0xff && pbCode[2] == 0x25) {
-		// or we can have the same with a REX prefix
-		INT32 lOffset = *(INT32 *)&pbCode[3];
-		// ... that shows us an absolute pointer
-		return SkipJumps(*(PBYTE*)(pbCode + 7 + lOffset));
-#endif
-	} else if (pbCode[0] == 0xe9) {
-		// here the behavior is identical, we have...
-		// ...a 32-bit offset to the destination.
-		return SkipJumps(pbCode + 5 + *(INT32 *)&pbCode[1]);
-	} else if (pbCode[0] == 0xeb) {
-		// and finally an 8-bit offset to the destination
-		return SkipJumps(pbCode + 2 + *(CHAR *)&pbCode[1]);
-	}
-#else
+    int32_t displacement = 0;
+    memcpy(&displacement, code + displacementOffset, sizeof(displacement));
+
+    if (!calculateRelativeAddress(instruction, jumpSize, displacement, &pointerSlot))
+        return MHOOK_STATUS_INVALID_TARGET;
+#else // !_M_IX86 && !_M_X64
 #error unsupported platform
-#endif
-	return pbOrgCode;
+#endif // _M_IX86 || _M_X64
+
+	*nextFunction = NULL;
+    const BOOL readResult = readMemory(pointerSlot, sizeof(*nextFunction), kReadableProtectionMask, nextFunction);
+
+    if (!readResult || !*nextFunction)
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
+ * @brief Resolves a supported relative entry-point jump.
+ * @param[in] instruction Address of the jump instruction.
+ * @param[in] isNearJump Whether the instruction contains a 32-bit displacement.
+ * @param[out] nextFunction Jump destination.
+ * @return Success or a validation failure.
+ */
+static MHOOK_STATUS resolveRelativeJump(PBYTE instruction, BOOL isNearJump, OUT PBYTE* nextFunction)
+{
+	assert(instruction);
+	assert(nextFunction);
+
+    const SIZE_T kNearJumpSize = 5;
+    const SIZE_T kShortJumpSize = 2;
+    const SIZE_T jumpSize = isNearJump ? kNearJumpSize : kShortJumpSize;
+
+    uint8_t code[kNearJumpSize] = {};
+
+    if (!readMemory(instruction, jumpSize, kReadableCodeProtectionMask, code))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    int32_t displacement = 0;
+    if (isNearJump)
+        memcpy(&displacement, code + 1, sizeof(displacement));
+    else
+    {
+        int8_t shortDisplacement = 0;
+        memcpy(&shortDisplacement, code + 1, sizeof(shortDisplacement));
+        displacement = shortDisplacement;
+    }
+
+	*nextFunction = NULL;
+    if (!calculateRelativeAddress(instruction, jumpSize, displacement, nextFunction))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
+ * @brief Resolves one supported entry-point jump.
+ * @param[in] function Address whose first instruction is inspected.
+ * @param[out] nextFunction Jump destination, or NULL when no jump is present.
+ * @return Success or a validation failure.
+ */
+static MHOOK_STATUS resolveSingleJump(PBYTE function, OUT PBYTE* nextFunction)
+{
+	assert(function);
+	assert(nextFunction);
+
+    const uint8_t kNearJumpOpcode = 0xE9;
+    const uint8_t kShortJumpOpcode = 0xEB;
+    const uint8_t kIndirectJumpOpcode = 0xFF;
+
+#ifdef _M_X64
+    const uint8_t kRexPrefix = 0x48;
+#endif // _M_X64
+
+#ifdef _M_IX86
+    const uint8_t kHotPatchSequence[] = { 0x8B, 0xFF };
+    const uint8_t kCollapsedFrameSequence[] = { 0x55, 0x8B, 0xEC, 0x5D };
+#endif // _M_IX86
+
+    *nextFunction = NULL;
+    PBYTE instruction = function;
+
+#ifdef _M_IX86
+    uint8_t entryBytes[sizeof(kCollapsedFrameSequence)] = {};
+
+    // Preserve jumps placed after the x86 hot-patch sequence.
+    if (!readMemory(instruction, 1, kReadableCodeProtectionMask, entryBytes))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    if (entryBytes[0] == kHotPatchSequence[0])
+    {
+        if (!readMemory(instruction, sizeof(kHotPatchSequence), kReadableCodeProtectionMask, entryBytes))
+            return MHOOK_STATUS_INVALID_TARGET;
+
+        if (memcmp(entryBytes, kHotPatchSequence, sizeof(kHotPatchSequence)) == 0)
+            instruction += sizeof(kHotPatchSequence);
+    }
+
+    // Preserve jumps placed after MSVC's collapsed stack-frame sequence.
+    if (!readMemory(instruction, 1, kReadableCodeProtectionMask, entryBytes))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    if (entryBytes[0] == kCollapsedFrameSequence[0])
+    {
+        if (!readMemory(instruction, sizeof(kCollapsedFrameSequence), kReadableCodeProtectionMask, entryBytes))
+            return MHOOK_STATUS_INVALID_TARGET;
+
+        if (memcmp(entryBytes, kCollapsedFrameSequence, sizeof(kCollapsedFrameSequence)) == 0)
+            instruction += sizeof(kCollapsedFrameSequence);
+    }
+#endif // _M_IX86
+
+    uint8_t opcode = 0;
+
+    if (!readMemory(instruction, sizeof(opcode), kReadableCodeProtectionMask, &opcode))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+	switch (opcode)
+	{
+	case kIndirectJumpOpcode:
+		return resolveIndirectJump(instruction, FALSE, nextFunction);
+
+#ifdef _M_X64
+	case kRexPrefix:
+		return resolveIndirectJump(instruction, TRUE, nextFunction);
+#endif // _M_X64
+
+	case kNearJumpOpcode:
+		return resolveRelativeJump(instruction, TRUE, nextFunction);
+
+	case kShortJumpOpcode:
+		return resolveRelativeJump(instruction, FALSE, nextFunction);
+
+	default:
+		return MHOOK_STATUS_SUCCESS;
+	}
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
+ * @brief Resolves a function through a bounded, acyclic jump chain.
+ * @param[in] function Initial function address.
+ * @param[out] target Final function address.
+ * @return Success or the first resolution failure.
+ */
+static MHOOK_STATUS resolveFunctionTarget(PBYTE function, OUT PBYTE* target)
+{
+	assert(function);
+	assert(target);
+
+    const SIZE_T kMaximumJumpDepth = 16;
+
+    PBYTE visitedFunctions[kMaximumJumpDepth + 1] = {};
+    PBYTE currentFunction = function;
+
+	*target = NULL;
+
+    for (SIZE_T depth = 0; depth <= kMaximumJumpDepth; ++depth)
+    {
+        visitedFunctions[depth] = currentFunction;
+
+        PBYTE nextFunction = NULL;
+        const MHOOK_STATUS status = resolveSingleJump(currentFunction, &nextFunction);
+
+        if (status != MHOOK_STATUS_SUCCESS)
+            return status;
+
+        if (!nextFunction)
+        {
+            *target = currentFunction;
+            return MHOOK_STATUS_SUCCESS;
+        }
+
+        // Report a cycle even when it closes at the depth boundary.
+        for (SIZE_T index = 0; index <= depth; ++index)
+        {
+            if (visitedFunctions[index] == nextFunction)
+                return MHOOK_STATUS_JUMP_CYCLE;
+        }
+
+        currentFunction = nextFunction;
+    }
+
+    return MHOOK_STATUS_JUMP_DEPTH_EXCEEDED;
 }
 
 //=========================================================================
@@ -871,8 +1174,23 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	EnterCritSec();
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
 	// find the real functions (jump over jump tables, if any)
-	pSystemFunction = SkipJumps((PBYTE)pSystemFunction);
-	pHookFunction   = SkipJumps((PBYTE)pHookFunction);
+    PBYTE resolvedSystemFunction = NULL;
+    PBYTE resolvedHookFunction = NULL;
+    operationStatus = resolveFunctionTarget(static_cast<PBYTE>(pSystemFunction), &resolvedSystemFunction);
+
+    if (operationStatus == MHOOK_STATUS_SUCCESS)
+        operationStatus = resolveFunctionTarget(static_cast<PBYTE>(pHookFunction), &resolvedHookFunction);
+
+    if (operationStatus != MHOOK_STATUS_SUCCESS)
+    {
+        LeaveCritSec();
+        g_lastStatus = operationStatus;
+        return FALSE;
+    }
+
+    pSystemFunction = resolvedSystemFunction;
+    pHookFunction = resolvedHookFunction;
+
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
 	// figure out the length of the overwrite zone
 	MHOOKS_PATCHDATA patchdata = {0};

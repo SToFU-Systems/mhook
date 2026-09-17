@@ -9,6 +9,7 @@
 
 #include "mhook-lib/mhook.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -90,6 +91,344 @@ static PVOID loadPointer(const void* source)
 
 
 /**
+ * @brief Makes a test buffer executable after its bytes have been initialized.
+ * @param[in] memory Buffer to protect.
+ * @param[in] size Size of the buffer.
+ * @return TRUE when protection and instruction-cache synchronization succeed.
+ */
+static BOOL makeMemoryExecutable(PVOID memory, SIZE_T size)
+{
+    DWORD oldProtection = 0;
+    const BOOL protectionResult = VirtualProtect(memory, size, PAGE_EXECUTE_READ, &oldProtection);
+    if (!protectionResult)
+        return FALSE;
+
+    return FlushInstructionCache(GetCurrentProcess(), memory, size);
+}
+
+
+/**
+ * @brief Verifies that an invalid set request fails without changing caller or target state.
+ * @param[in] systemFunction Requested system-function address.
+ * @param[in] hookFunction Requested hook-function address.
+ * @param[in] expectedStatus Status expected from the rejected request.
+ * @param[in] observedMemory Target memory to compare, or NULL when it is inaccessible.
+ * @param[in] expectedMemory Snapshot of the target memory, or NULL when it is inaccessible.
+ * @param[in] memorySize Number of target bytes in the snapshot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int expectInvalidSet(PVOID systemFunction, PVOID hookFunction, MHOOK_STATUS expectedStatus, const void* observedMemory, const BYTE* expectedMemory, SIZE_T memorySize)
+{
+    PVOID descriptor = systemFunction;
+    const BOOL result = Mhook_SetHook(&descriptor, hookFunction);
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const BOOL descriptorChanged = descriptor != systemFunction;
+    const BOOL targetChanged = expectedMemory && memcmp(observedMemory, expectedMemory, memorySize) != 0;
+
+    if (result)
+    {
+        PVOID trampoline = descriptor;
+        Mhook_Unhook(&trampoline);
+    }
+
+    if (result)
+        return Fail("Mhook_SetHook accepted an invalid function address");
+    if (status != expectedStatus)
+        return Fail("an invalid function address reported the wrong status");
+    if (descriptorChanged)
+        return Fail("a rejected function address changed the caller's descriptor");
+    if (targetChanged)
+        return Fail("a rejected function address modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_SetHook rejects a pointer slot without changing readable state.
+ * @param[in,out] slot Pointer slot supplied to Mhook_SetHook.
+ * @param[in] expectedPointer Expected pointer value, or NULL when the slot cannot be read.
+ * @param[in] target Target bytes to compare, or NULL when no target is available.
+ * @param[in] snapshot Expected target bytes, or NULL when no target is available.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int expectInvalidSetSlot(PVOID* slot, PVOID expectedPointer, const BYTE* target, const BYTE* snapshot)
+{
+    assert((target == NULL) == (snapshot == NULL));
+
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const PVOID storedPointer = expectedPointer ? loadPointer(slot) : NULL;
+    const BOOL slotChanged = expectedPointer && storedPointer != expectedPointer;
+    const BOOL targetChanged = snapshot && memcmp(target, snapshot, kTargetBufferSize) != 0;
+
+    if (result && storedPointer)
+    {
+        PVOID trampoline = storedPointer;
+        Mhook_Unhook(&trampoline);
+    }
+
+    if (result)
+        return Fail("Mhook_SetHook accepted an invalid function-pointer slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("an invalid function-pointer slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected function-pointer slot was modified");
+    if (targetChanged)
+        return Fail("a rejected function-pointer slot modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that Mhook_Unhook rejects a pointer slot without changing readable state.
+ * @param[in,out] slot Pointer slot supplied to Mhook_Unhook.
+ * @param[in] expectedPointer Expected pointer value, or NULL when the slot cannot be read.
+ * @param[in] target Target bytes to compare, or NULL when no target is available.
+ * @param[in] snapshot Expected target bytes, or NULL when no target is available.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int expectInvalidUnhookSlot(PVOID* slot, PVOID expectedPointer, const BYTE* target, const BYTE* snapshot)
+{
+    assert((target == NULL) == (snapshot == NULL));
+
+    const BOOL result = Mhook_Unhook(slot);
+    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const BOOL slotChanged = expectedPointer && loadPointer(slot) != expectedPointer;
+    const BOOL targetChanged = snapshot && memcmp(target, snapshot, kTargetBufferSize) != 0;
+
+    if (result)
+        return Fail("Mhook_Unhook accepted an invalid function-pointer slot");
+    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
+        return Fail("an invalid function-pointer slot did not report INVALID_DESCRIPTOR");
+    if (slotChanged)
+        return Fail("a rejected function-pointer slot was modified");
+    if (targetChanged)
+        return Fail("a rejected function-pointer slot modified target code");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that an inaccessible system-function address is rejected safely.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetTargetAccess(void)
+{
+    PVOID target = VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+
+    if (!target)
+        return Fail("VirtualAlloc for the inaccessible target failed");
+
+    const int result = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, NULL, NULL, 0);
+    VirtualFree(target, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that a readable but non-executable system-function address is rejected.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetTargetExecute(void)
+{
+    PBYTE target = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!target)
+        return Fail("VirtualAlloc for the non-executable target failed");
+
+    memset(target, 0xCC, kTargetBufferSize);
+    memcpy(target, kMovEaxRet, sizeof(kMovEaxRet));
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+
+    const int result = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, target, snapshot, sizeof(snapshot));
+    VirtualFree(target, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that an inaccessible hook-function address is rejected safely.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetHookAccess(void)
+{
+    PBYTE target = allocateTarget();
+    PVOID hook = VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+
+    if (!target || !hook)
+    {
+        if (hook)
+            VirtualFree(hook, 0, MEM_RELEASE);
+        if (target)
+            VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualAlloc for the inaccessible hook test failed");
+    }
+
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+    const int result = expectInvalidSet(target, hook, MHOOK_STATUS_INVALID_TARGET, target, snapshot, sizeof(snapshot));
+    VirtualFree(hook, 0, MEM_RELEASE);
+    VirtualFree(target, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that a thunk truncated by inaccessible memory is rejected safely.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetThunkBoundary(void)
+{
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+    const SIZE_T pageSize = systemInfo.dwPageSize;
+    const SIZE_T allocationSize = pageSize * 2;
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, allocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the truncated thunk failed");
+
+    PBYTE thunk = memory + pageSize - 1;
+    thunk[0] = 0xE9;
+    const BYTE snapshot[] = { 0xE9 };
+    DWORD oldProtection = 0;
+    const BOOL executableResult = makeMemoryExecutable(memory, pageSize);
+    const BOOL inaccessibleResult = VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &oldProtection);
+
+    if (!executableResult || !inaccessibleResult)
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("protecting the truncated thunk failed");
+    }
+
+    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, thunk, snapshot, sizeof(snapshot));
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that an inaccessible indirect thunk slot is rejected safely.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetThunkIndirect(void)
+{
+    const SIZE_T kThunkSize = 6;
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+    const SIZE_T pageSize = systemInfo.dwPageSize;
+    const SIZE_T allocationSize = pageSize * 2;
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, allocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the indirect thunk failed");
+
+    PBYTE thunk = memory;
+    PBYTE pointerSlot = memory + pageSize;
+    thunk[0] = 0xFF;
+    thunk[1] = 0x25;
+#ifdef _M_IX86
+    const DWORD slotAddress = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(pointerSlot));
+    memcpy(thunk + 2, &slotAddress, sizeof(slotAddress));
+#elif defined _M_X64
+    const INT32 slotOffset = static_cast<INT32>(pointerSlot - (thunk + kThunkSize));
+    memcpy(thunk + 2, &slotOffset, sizeof(slotOffset));
+#else // !_M_IX86 && !_M_X64
+#error unsupported platform
+#endif // _M_IX86 || _M_X64
+    BYTE snapshot[kThunkSize] = {};
+    memcpy(snapshot, thunk, sizeof(snapshot));
+
+    DWORD oldProtection = 0;
+    const BOOL executableResult = makeMemoryExecutable(memory, pageSize);
+    const BOOL inaccessibleResult = VirtualProtect(pointerSlot, pageSize, PAGE_NOACCESS, &oldProtection);
+
+    if (!executableResult || !inaccessibleResult)
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("protecting the indirect thunk failed");
+    }
+
+    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, thunk, snapshot, sizeof(snapshot));
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that a cyclic thunk is rejected without unbounded recursion.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetThunkCycle(void)
+{
+    const INT32 kSelfOffset = -5;
+    PBYTE thunk = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!thunk)
+        return Fail("VirtualAlloc for the cyclic thunk failed");
+
+    memset(thunk, 0xCC, kTargetBufferSize);
+    thunk[0] = 0xE9;
+    memcpy(thunk + 1, &kSelfOffset, sizeof(kSelfOffset));
+    BYTE snapshot[kTargetBufferSize] = {};
+    memcpy(snapshot, thunk, sizeof(snapshot));
+
+    if (!makeMemoryExecutable(thunk, kTargetBufferSize))
+    {
+        VirtualFree(thunk, 0, MEM_RELEASE);
+        return Fail("protecting the cyclic thunk failed");
+    }
+
+    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_JUMP_CYCLE, thunk, snapshot, sizeof(snapshot));
+    VirtualFree(thunk, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
+ * @brief Verifies that an excessive acyclic thunk chain is rejected.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidSetThunkDepth(void)
+{
+    const SIZE_T kThunkSize = 5;
+    const SIZE_T kThunkStride = 8;
+    const SIZE_T kThunkCount = 17;
+    const SIZE_T kBufferSize = kThunkStride * kThunkCount + kTargetBufferSize;
+    const INT32 kNextThunkOffset = static_cast<INT32>(kThunkStride - kThunkSize);
+    PBYTE memory = static_cast<PBYTE>(VirtualAlloc(NULL, kBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    if (!memory)
+        return Fail("VirtualAlloc for the deep thunk chain failed");
+
+    memset(memory, 0xCC, kBufferSize);
+    for (SIZE_T index = 0; index < kThunkCount; ++index)
+    {
+        PBYTE thunk = memory + index * kThunkStride;
+        thunk[0] = 0xE9;
+        memcpy(thunk + 1, &kNextThunkOffset, sizeof(kNextThunkOffset));
+    }
+    memcpy(memory + kThunkCount * kThunkStride, kMovEaxRet, sizeof(kMovEaxRet));
+
+    BYTE snapshot[kBufferSize] = {};
+    memcpy(snapshot, memory, sizeof(snapshot));
+    if (!makeMemoryExecutable(memory, kBufferSize))
+    {
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return Fail("protecting the deep thunk chain failed");
+    }
+
+    const int result = expectInvalidSet(memory, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_JUMP_DEPTH_EXCEEDED, memory, snapshot, sizeof(snapshot));
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return result;
+}
+
+
+/**
  * @brief Verifies that Mhook_SetHook rejects a misaligned pointer slot.
  * @return Zero on success; otherwise a test failure code.
  */
@@ -106,30 +445,9 @@ static int caseInvalidSetSlotAlignment(void)
     memcpy(snapshot, target, sizeof(snapshot));
     storePointer(slot, target);
 
-    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
-    const PVOID storedPointer = loadPointer(slot);
-
-    if (result)
-    {
-        PVOID trampoline = storedPointer;
-        Mhook_Unhook(&trampoline);
-    }
-
-    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
-    const BOOL slotChanged = storedPointer != target;
+    const int result = expectInvalidSetSlot(slot, target, target, snapshot);
     VirtualFree(target, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_SetHook accepted a misaligned system-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("a misaligned system-function slot did not report INVALID_DESCRIPTOR");
-    if (slotChanged)
-        return Fail("a rejected misaligned system-function slot was modified");
-    if (targetChanged)
-        return Fail("a rejected misaligned system-function slot modified target code");
-
-    return 0;
+    return result;
 }
 
 
@@ -144,16 +462,9 @@ static int caseInvalidSetSlotAccess(void)
     if (!slot)
         return Fail("VirtualAlloc for the inaccessible slot failed");
 
-    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const int result = expectInvalidSetSlot(slot, NULL, NULL, NULL);
     VirtualFree(slot, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_SetHook accepted an inaccessible system-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("an inaccessible system-function slot did not report INVALID_DESCRIPTOR");
-
-    return 0;
+    return result;
 }
 
 
@@ -188,23 +499,10 @@ static int caseInvalidSetSlotWrite(void)
         return Fail("VirtualProtect for the read-only slot failed");
     }
 
-    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookReplacement));
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
-    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
-    const BOOL slotChanged = loadPointer(slot) != target;
+    const int result = expectInvalidSetSlot(slot, target, target, snapshot);
     VirtualFree(slot, 0, MEM_RELEASE);
     VirtualFree(target, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_SetHook accepted a read-only system-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("a read-only system-function slot did not report INVALID_DESCRIPTOR");
-    if (slotChanged)
-        return Fail("a rejected read-only system-function slot was modified");
-    if (targetChanged)
-        return Fail("a rejected read-only system-function slot modified target code");
-
-    return 0;
+    return result;
 }
 
 
@@ -233,26 +531,10 @@ static int caseInvalidUnhookSlotAlignment(void)
     storePointer(slot, trampoline);
     const PVOID expectedPointer = trampoline;
 
-    const BOOL result = Mhook_Unhook(slot);
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
-    const PVOID storedPointer = loadPointer(slot);
-    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
-    const BOOL slotChanged = storedPointer != expectedPointer;
-
-    if (!result)
-        Mhook_Unhook(&trampoline);
+    const int result = expectInvalidUnhookSlot(slot, expectedPointer, target, snapshot);
+    Mhook_Unhook(&trampoline);
     VirtualFree(target, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_Unhook accepted a misaligned hooked-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("a misaligned hooked-function slot did not report INVALID_DESCRIPTOR");
-    if (slotChanged)
-        return Fail("a rejected misaligned hooked-function slot was modified");
-    if (targetChanged)
-        return Fail("a rejected misaligned hooked-function slot modified target code");
-
-    return 0;
+    return result;
 }
 
 
@@ -267,16 +549,9 @@ static int caseInvalidUnhookSlotAccess(void)
     if (!slot)
         return Fail("VirtualAlloc for the inaccessible slot failed");
 
-    const BOOL result = Mhook_Unhook(slot);
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
+    const int result = expectInvalidUnhookSlot(slot, NULL, NULL, NULL);
     VirtualFree(slot, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_Unhook accepted an inaccessible hooked-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("an inaccessible hooked-function slot did not report INVALID_DESCRIPTOR");
-
-    return 0;
+    return result;
 }
 
 
@@ -320,26 +595,11 @@ static int caseInvalidUnhookSlotWrite(void)
         return Fail("VirtualProtect for the read-only unhook slot failed");
     }
 
-    const BOOL result = Mhook_Unhook(slot);
-    const MHOOK_STATUS status = Mhook_GetLastStatus();
-    const BOOL targetChanged = memcmp(snapshot, target, sizeof(snapshot)) != 0;
-    const BOOL slotChanged = loadPointer(slot) != trampoline;
-
-    if (!result)
-        Mhook_Unhook(&trampoline);
+    const int result = expectInvalidUnhookSlot(slot, trampoline, target, snapshot);
+    Mhook_Unhook(&trampoline);
     VirtualFree(slot, 0, MEM_RELEASE);
     VirtualFree(target, 0, MEM_RELEASE);
-
-    if (result)
-        return Fail("Mhook_Unhook accepted a read-only hooked-function slot");
-    if (status != MHOOK_STATUS_INVALID_DESCRIPTOR)
-        return Fail("a read-only hooked-function slot did not report INVALID_DESCRIPTOR");
-    if (slotChanged)
-        return Fail("a rejected read-only hooked-function slot was modified");
-    if (targetChanged)
-        return Fail("a rejected read-only hooked-function slot modified target code");
-
-    return 0;
+    return result;
 }
 
 static int CaseInitial(void)
@@ -480,6 +740,13 @@ struct StatusTestCase
 static const StatusTestCase kStatusTestCases[] = {
     { "initial", CaseInitial },
     { "invalid_set", CaseInvalidSet },
+    { "invalid_set_target_access", caseInvalidSetTargetAccess },
+    { "invalid_set_target_execute", caseInvalidSetTargetExecute },
+    { "invalid_set_hook_access", caseInvalidSetHookAccess },
+    { "invalid_set_thunk_boundary", caseInvalidSetThunkBoundary },
+    { "invalid_set_thunk_indirect", caseInvalidSetThunkIndirect },
+    { "invalid_set_thunk_cycle", caseInvalidSetThunkCycle },
+    { "invalid_set_thunk_depth", caseInvalidSetThunkDepth },
     { "invalid_set_slot_alignment", caseInvalidSetSlotAlignment },
     { "invalid_set_slot_access", caseInvalidSetSlotAccess },
     { "invalid_set_slot_write", caseInvalidSetSlotWrite },

@@ -26,6 +26,8 @@ Licensed under the [MIT License](LICENSE).
 
 `Mhook_SetHook` and `Mhook_Unhook` retain their Boolean results. Call `Mhook_GetLastStatus` immediately after either operation when a detailed result is needed. The status belongs to the calling thread and is replaced by its next hook or unhook operation.
 
+`Mhook_SetHook` follows at most 16 entry-point jumps for both the target and replacement. It rejects longer chains, cycles, and addresses that cannot be read as executable code before changing hook state.
+
 | Status | Meaning | Handling |
 | --- | --- | --- |
 | `MHOOK_STATUS_SUCCESS` | No reported failure. | Continue normally. |
@@ -39,6 +41,9 @@ Licensed under the [MIT License](LICENSE).
 | `MHOOK_STATUS_PATCH_FAILED` | Publishing modified code failed. | Treat the hook state as uncertain and stop further hook changes. |
 | `MHOOK_STATUS_TARGET_MODIFIED` | Another writer modified the target after the hook was installed. | Leave the hook installed and retry only after Mhook's patch has been restored. |
 | `MHOOK_STATUS_INVALID_DESCRIPTOR` | The supplied function-pointer slot is misaligned, unreadable, or unwritable. | Pass an aligned pointer to readable and writable `PVOID` storage. |
+| `MHOOK_STATUS_INVALID_TARGET` | A target or replacement cannot be read as executable code, or an indirect jump slot is unreadable. | Correct the address or its memory protection before retrying. |
+| `MHOOK_STATUS_JUMP_CYCLE` | Entry-point jump resolution encountered an address it had already visited. | Correct the cyclic thunk chain before retrying. |
+| `MHOOK_STATUS_JUMP_DEPTH_EXCEEDED` | Entry-point jump resolution would follow more than 16 jumps. | Shorten the thunk chain before retrying. |
 
 ## Build
 
