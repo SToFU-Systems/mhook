@@ -62,7 +62,7 @@ typedef enum MHOOK_STATUS
     /** No monitored operation reported a failure. */
     MHOOK_STATUS_SUCCESS = 0,
 
-    /** A required pointer or pointed-to address was NULL. */
+    /** A required address is NULL, or the resolved target and replacement are identical. */
     MHOOK_STATUS_INVALID_ARGUMENT = 1,
 
     /** The target prologue could not be decoded. */
@@ -87,7 +87,22 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_PATCH_FAILED = 8,
 
     /** Another writer modified the target after the hook was installed. */
-    MHOOK_STATUS_TARGET_MODIFIED = 9
+    MHOOK_STATUS_TARGET_MODIFIED = 9,
+
+    /** The caller's function-pointer slot is misaligned, unreadable, or unwritable. */
+    MHOOK_STATUS_INVALID_DESCRIPTOR = 10,
+
+    /** Executable code or an indirect jump's pointer slot cannot be read. */
+    MHOOK_STATUS_INVALID_TARGET = 11,
+
+    /** Following entry-point jumps encountered an address already visited. */
+    MHOOK_STATUS_JUMP_CYCLE = 12,
+
+    /** Following entry-point jumps exceeded the supported depth. */
+    MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13,
+
+    /** A function-resolution chain reached a target with an active hook. */
+    MHOOK_STATUS_ALREADY_HOOKED = 14
 } MHOOK_STATUS;
 
 
@@ -108,8 +123,10 @@ typedef enum MHOOK_STATUS
 /**
  * @brief Installs a hook, redirecting a function to a replacement.
  *
- * Both addresses are followed through jump thunks first, so hooking an import
- * stub hooks the function behind it.
+ * Both addresses are followed through up to 16 jump thunks first, so hooking
+ * an import stub hooks the function behind it. Longer or cyclic chains are
+ * rejected. Requests are also rejected when both chains resolve to the same
+ * address or either chain reaches a target with an active hook.
  *
  * @param[in,out] ppSystemFunction On entry the function to hook. On success,
  *        receives the trampoline: call it to reach the original, and pass it to
