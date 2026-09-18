@@ -3,13 +3,13 @@ import os
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, get
+from conan.tools.files import copy, get, rmdir
 
 
 class MhookConan(ConanFile):
     name = "mhook-fork-dev"
-    version = "0.0.0-dev"
     license = "MIT"
+    url = "https://github.com/conan-io/conan-center-index"
     homepage = "https://github.com/SToFU-Systems/mhook"
     description = "SToFU Systems fork of the Mhook Windows API hooking library"
     package_type = "static-library"
@@ -23,17 +23,12 @@ class MhookConan(ConanFile):
         cmake_layout(self)
 
     def source(self):
-        get(
-            self,
-            url="https://github.com/SToFU-Systems/mhook/archive/refs/tags/<release-tag>.tar.gz",
-            sha256="<sha256>",
-            strip_root=True,
-        )
+        get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def generate(self):
         toolchain = CMakeToolchain(self)
-        toolchain.variables["BUILD_TESTING"] = False
-        toolchain.variables["MHOOK_BUILD_EXAMPLES"] = False
+        toolchain.cache_variables["BUILD_TESTING"] = False
+        toolchain.cache_variables["MHOOK_BUILD_EXAMPLES"] = False
         toolchain.generate()
 
     def build(self):
@@ -46,6 +41,8 @@ class MhookConan(ConanFile):
         cmake.install()
         copy(self, "LICENSE", src=self.source_folder,
              dst=os.path.join(self.package_folder, "licenses"))
+        rmdir(self, os.path.join(self.package_folder, "lib", "cmake"))
+        rmdir(self, os.path.join(self.package_folder, "share"))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "mhook")
