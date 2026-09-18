@@ -71,6 +71,22 @@ cmake --build --preset msvc-[x86/x64]-[debug/release]
 ctest --preset msvc-[x86/x64]-[debug/release]
 ```
 
+### Install
+
+Run `python build.py`, select an MSVC preset, then select **Install**. The script
+configures, builds, tests, and installs Mhook to `build/install/<preset>`.
+Each architecture and configuration has its own install directory.
+
+An installed package can be used from another CMake project:
+
+```cmake
+find_package(mhook CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE mhook::mhook)
+```
+
+Configure that project with `CMAKE_PREFIX_PATH` pointing to the chosen install
+directory. The public header is available as `<mhook-lib/mhook.h>`.
+
 ### MinGW (WIP)
 
 ```powershell

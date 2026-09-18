@@ -9,6 +9,7 @@ ACTIONS = {
     1: {"label": "Build", "clean": False, "build": True},
     2: {"label": "Rebuild", "clean": True, "build": True},
     3: {"label": "Clean", "clean": True, "build": False},
+    4: {"label": "Install", "clean": False, "build": True, "install": True},
 }
 
 
@@ -108,6 +109,14 @@ def main(argv=None):
                     [ctest, "--preset", build_preset],
                 ))
             for command in commands:
+                print("> " + subprocess.list2cmdline(command), flush=True)
+                subprocess.run(command, cwd=repo_root, check=True)
+            if action.get("install", False):
+                install_dir = repo_root / "build" / "install" / build_preset
+                command = [
+                    cmake, "--install", str(build_dirs[configure_preset]),
+                    "--config", preset["configuration"], "--prefix", str(install_dir),
+                ]
                 print("> " + subprocess.list2cmdline(command), flush=True)
                 subprocess.run(command, cwd=repo_root, check=True)
             processed.add(configure_preset)
