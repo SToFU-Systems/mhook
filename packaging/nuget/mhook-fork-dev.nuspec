@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd">
+  <metadata>
+    <id>mhook-fork-dev</id>
+    <version>0.0.0-dev</version>
+    <authors>SToFU Systems</authors>
+    <description>SToFU Systems fork of the Mhook Windows API hooking library</description>
+    <projectUrl>https://github.com/SToFU-Systems/mhook</projectUrl>
+    <license type="expression">MIT</license>
+    <tags>native C++ Windows hooking</tags>
+  </metadata>
+  <files>
+    <file src="build/install/msvc-x64-release/include/mhook-lib/mhook.h" target="build/native/include/mhook-lib" />
+    <file src="build/install/msvc-x86-debug/lib/mhook.lib" target="build/native/lib/x86/Debug" />
+    <file src="build/install/msvc-x86-release/lib/mhook.lib" target="build/native/lib/x86/Release" />
+    <file src="build/install/msvc-x64-debug/lib/mhook.lib" target="build/native/lib/x64/Debug" />
+    <file src="build/install/msvc-x64-release/lib/mhook.lib" target="build/native/lib/x64/Release" />
+    <file src="packaging/nuget/mhook-fork-dev.targets" target="build/native" />
+    <file src="LICENSE" target="LICENSE" />
+  </files>
+</package>
