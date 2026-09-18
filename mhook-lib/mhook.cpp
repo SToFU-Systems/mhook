@@ -349,6 +349,40 @@ static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
 
 
 /**
+ * @brief Validates that a batch array can be read and receive per-request results.
+ * @param[in,out] hooks Caller-owned descriptor array.
+ * @param[in] hookCount Number of descriptors in hooks.
+ * @return MHOOK_STATUS_SUCCESS when the entire array is usable; otherwise the validation failure.
+ */
+static MHOOK_STATUS validateHookInfoArray(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
+{
+	constexpr SIZE_T kHookMaxCount = SIZE_MAX / sizeof(*hooks);
+
+    // Reject empty or overflowing ranges before calculating descriptor addresses.
+    if (!hooks || !hookCount || hookCount > kHookMaxCount)
+        return MHOOK_STATUS_INVALID_ARGUMENT;
+
+    // Require natural alignment so every descriptor can be accessed safely.
+    const uintptr_t hooksAddress = reinterpret_cast<uintptr_t>(hooks);
+    const BOOL isAligned = hooksAddress % alignof(MHOOK_HOOK_INFO) == 0;
+
+    if (!isAligned)
+        return MHOOK_STATUS_INVALID_DESCRIPTOR;
+
+    // Validate every descriptor because each operation reads its fields and writes its status.
+    for (SIZE_T index = 0; index < hookCount; ++index)
+    {
+        MHOOK_HOOK_INFO hook = {};
+
+        if (!readMemory(&hooks[index], sizeof(hook), kWritableProtectionMask, &hook))
+            return MHOOK_STATUS_INVALID_DESCRIPTOR;
+    }
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
  * @brief Finds an active hook by its resolved target address.
  * @param[in] targetFunction Resolved target address to find.
  * @return The registered trampoline, or NULL when the target is not hooked.
@@ -1261,9 +1295,16 @@ MHOOK_STATUS Mhook_GetLastStatus(void)
 }
 
 //=========================================================================
-BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
+/**
+ * @brief Installs one hook and records the operation status.
+ * @param[in,out] ppSystemFunction Caller slot receiving the trampoline on success.
+ * @param[in] pHookFunction Replacement function with the target's calling contract.
+ * @return TRUE after the target is patched and the trampoline is published.
+ */
+static BOOL setHook(PVOID* ppSystemFunction, PVOID pHookFunction) {
     const DWORD callerLastError = GetLastError();
 
+    // Reject missing inputs before reading caller-owned memory.
     if (!ppSystemFunction || !pHookFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
@@ -1271,6 +1312,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
         return FALSE;
     }
 
+    // Copy the target from validated writable storage so failure leaves the slot unchanged.
     PVOID pSystemFunction = NULL;
     if (!readWritablePointerSlot(ppSystemFunction, &pSystemFunction))
     {
@@ -1279,6 +1321,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
         return FALSE;
     }
 
+    // A writable slot still cannot describe a hook without a target value.
     if (!pSystemFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
@@ -1288,10 +1331,11 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 
 	MHOOKS_TRAMPOLINE* pTrampoline = NULL;
 
-	// ensure thread-safety
+	// Serialize resolution, registry access, and patch publication as one operation.
 	EnterCritSec();
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
-    // find the real functions (jump over jump tables, if any)
+
+    // Resolve entry jumps before allocation so conflicts fail without changing process state.
     PBYTE resolvedSystemFunction = NULL;
     PBYTE resolvedHookFunction = NULL;
 
@@ -1309,7 +1353,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
     pHookFunction = resolvedHookFunction;
 
 	ODPRINTF((L"mhooks: Mhook_SetHook: Started on the job: %p / %p", pSystemFunction, pHookFunction));
-	// figure out the length of the overwrite zone
+	// Decode whole instructions so the target patch never splits an instruction.
 	MHOOKS_PATCHDATA patchdata = {0};
 
 	DWORD dwInstructionLength = 0;
@@ -1318,119 +1362,197 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
 	if (operationStatus == MHOOK_STATUS_SUCCESS)
 	{
 		ODPRINTF((L"mhooks: Mhook_SetHook: disassembly signals %d bytes", dwInstructionLength));
-		// suspend every other thread in this process, and make sure their IP 
-		// is not in the code we're about to overwrite.
+
+		// Move peer instruction pointers away before executable bytes are changed.
 		SuspendOtherThreads((PBYTE)pSystemFunction, dwInstructionLength);
-		// allocate a trampoline structure (TODO: it is pretty wasteful to get
-		// VirtualAlloc to grab chunks of memory smaller than 100 bytes)
+
+		// Allocate near the target so relocated instructions and jumps remain representable.
 		pTrampoline = TrampolineAlloc((PBYTE)pSystemFunction, patchdata.nLimitUp, patchdata.nLimitDown);
-		if (pTrampoline) {
+
+		if (pTrampoline)
+		{
 			ODPRINTF((L"mhooks: Mhook_SetHook: allocated structure at %p", pTrampoline));
 			DWORD dwOldProtectSystemFunction = 0;
 			DWORD dwOldProtectTrampolineFunction = 0;
-			// set the system function to PAGE_EXECUTE_READWRITE
-			if (VirtualProtect(pSystemFunction, dwInstructionLength, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction)) {
+
+			// Make the target writable only while its patch is installed.
+			if (VirtualProtect(pSystemFunction, dwInstructionLength, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction))
+			{
 				ODPRINTF((L"mhooks: Mhook_SetHook: readwrite set on system function"));
-				// mark our trampoline buffer to PAGE_EXECUTE_READWRITE
-				if (VirtualProtect(pTrampoline, sizeof(MHOOKS_TRAMPOLINE), PAGE_EXECUTE_READWRITE, &dwOldProtectTrampolineFunction)) {
+
+				// Make the trampoline writable while copied instructions and jumps are emitted.
+				if (VirtualProtect(pTrampoline, sizeof(MHOOKS_TRAMPOLINE), PAGE_EXECUTE_READWRITE, &dwOldProtectTrampolineFunction))
+				{
 					ODPRINTF((L"mhooks: Mhook_SetHook: readwrite set on trampoline structure"));
 
-					// create our trampoline function
+					// Copy the overwritten instructions before appending the continuation jump.
 					PBYTE pbCode = pTrampoline->codeTrampoline;
-					// save original code..
-					for (DWORD i = 0; i<dwInstructionLength; i++) {
+
+					for (DWORD i = 0; i < dwInstructionLength; i++)
 						pTrampoline->codeUntouched[i] = pbCode[i] = ((PBYTE)pSystemFunction)[i];
-					}
+
 					pbCode += dwInstructionLength;
-					// plus a jump to the continuation in the original location
+
+					// Continue after the overwritten region when callers use the trampoline.
 					pbCode = EmitJump(pbCode, ((PBYTE)pSystemFunction) + dwInstructionLength);
 					ODPRINTF((L"mhooks: Mhook_SetHook: updated the trampoline"));
 
-					// fix up any IP-relative addressing in the code
+					// Rebase copied IP-relative operands so relocated instructions keep their targets.
 					FixupIPRelativeAddressing(pTrampoline->codeTrampoline, (PBYTE)pSystemFunction, &patchdata);
 
 					DWORD_PTR dwDistance = (PBYTE)pHookFunction < (PBYTE)pSystemFunction ? 
 						(PBYTE)pSystemFunction - (PBYTE)pHookFunction : (PBYTE)pHookFunction - (PBYTE)pSystemFunction;
-					if (dwDistance > 0x7fff0000) {
-						// create a stub that jumps to the replacement function.
-						// we need this because jumping from the API to the hook directly 
-						// will be a long jump, which is 14 bytes on x64, and we want to 
-						// avoid that - the API may or may not have room for such stuff. 
-						// (remember, we only have 5 bytes guaranteed in the API.)
-						// on the other hand we do have room, and the trampoline will always be
-						// within +/- 2GB of the API, so we do the long jump in there. 
-						// the API will jump to the "reverse trampoline" which
-						// will jump to the user's hook code.
+
+					if (dwDistance > 0x7fff0000)
+					{
+						// Route distant hooks through a nearby stub so the target needs only a short jump.
 						pbCode = pTrampoline->codeJumpToHookFunction;
 						pbCode = EmitJump(pbCode, (PBYTE)pHookFunction);
+
 						ODPRINTF((L"mhooks: Mhook_SetHook: created reverse trampoline"));
 						FlushInstructionCache(GetCurrentProcess(), pTrampoline->codeJumpToHookFunction, 
 							pbCode - pTrampoline->codeJumpToHookFunction);
 
-						// update the API itself
+						// Redirect the target to the nearby hook stub.
 						pbCode = (PBYTE)pSystemFunction;
 						pbCode = EmitJump(pbCode, pTrampoline->codeJumpToHookFunction);
-					} else {
-						// the jump will be at most 5 bytes so we can do it directly
-						// update the API itself
+					}
+					else
+					{
+						// Redirect directly when the replacement is within short-jump range.
 						pbCode = (PBYTE)pSystemFunction;
 						pbCode = EmitJump(pbCode, (PBYTE)pHookFunction);
 					}
 
-					// Snapshot what we actually left in the prologue rather than
-					// recomputing it later: this captures whichever jump form
-					// EmitJump chose, plus any original bytes trailing it when
-					// the overwrite zone is longer than the jump.
+					// Save the installed bytes so unhook refuses to overwrite a later patch.
 					memcpy(pTrampoline->codeInstalledPatch, pSystemFunction, dwInstructionLength);
 
-					// update data members
+					// Record ownership data required to identify and restore this hook.
 					pTrampoline->cbOverwrittenCode = dwInstructionLength;
 					pTrampoline->pSystemFunction = (PBYTE)pSystemFunction;
 					pTrampoline->pHookFunction = (PBYTE)pHookFunction;
 
-					// flush instruction cache and restore original protection
+					// Publish generated code before restoring the trampoline's protection.
 					FlushInstructionCache(GetCurrentProcess(), pTrampoline->codeTrampoline, dwInstructionLength);
 					VirtualProtect(pTrampoline, sizeof(MHOOKS_TRAMPOLINE), dwOldProtectTrampolineFunction, &dwOldProtectTrampolineFunction);
-				} else {
+				}
+				else
+				{
                     operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 					ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 2: %d", gle()));
 				}
-				// flush instruction cache and restore original protection
+
+				// Publish the target patch before restoring its original protection.
 				FlushInstructionCache(GetCurrentProcess(), pSystemFunction, dwInstructionLength);
 				VirtualProtect(pSystemFunction, dwInstructionLength, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
-			} else {
+			}
+			else
+			{
                 operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 				ODPRINTF((L"mhooks: Mhook_SetHook: failed VirtualProtect 1: %d", gle()));
 			}
-			if (pTrampoline->pSystemFunction) {
-				// this is what the application will use as the entry point
-				// to the "original" unhooked function.
+
+			if (pTrampoline->pSystemFunction)
+			{
+				// Publish the trampoline only after the target patch is complete.
 				*ppSystemFunction = pTrampoline->codeTrampoline;
 				ODPRINTF((L"mhooks: Mhook_SetHook: Hooked the function!"));
-			} else {
-				// if we failed discard the trampoline (forcing VirtualFree)
+			}
+			else
+			{
+				// Discard incomplete state so failed requests remain unpublished.
 				TrampolineFree(pTrampoline, TRUE);
 				pTrampoline = NULL;
 			}
-		} else {
+		}
+		else
+		{
             operationStatus = MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED;
 		}
-		// resume everybody else
+
+		// Resume peer threads after all executable-memory writes are complete.
 		ResumeOtherThreads();
-	} else {
+	}
+	else 
+	{
 		ODPRINTF((L"mhooks: disassembly signals %d bytes (unacceptable)", dwInstructionLength));
 	}
 
+	// Release serialized state before publishing the thread-local result.
 	LeaveCritSec();
     g_lastStatus = operationStatus;
     SetLastError(callerLastError);
     return operationStatus == MHOOK_STATUS_SUCCESS;
 }
 
+
+/**
+ * @brief Installs each valid batch request through the shared single-hook workflow.
+ * @param[in,out] hooks Requests to install and storage for their results.
+ * @param[in] hookCount Number of descriptors in hooks.
+ * @return TRUE only when every request succeeds.
+ */
+BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
+{
+    const DWORD callerLastError = GetLastError();
+    const MHOOK_STATUS validationStatus = validateHookInfoArray(hooks, hookCount);
+
+    // Reject the entire request before any hook runs when result storage is unusable.
+    if (validationStatus != MHOOK_STATUS_SUCCESS)
+    {
+        g_lastStatus = validationStatus;
+        SetLastError(callerLastError);
+        return FALSE;
+    }
+
+    BOOL result = TRUE;
+    MHOOK_STATUS batchStatus = MHOOK_STATUS_SUCCESS;
+
+    // Process every request so callers receive a status for each descriptor.
+    for (SIZE_T index = 0; index < hookCount; ++index)
+    {
+        SetLastError(callerLastError);
+        const BOOL hookResult = setHook(hooks[index].ppSystemFunction, hooks[index].pHookFunction);
+        hooks[index].status = g_lastStatus;
+
+        // Preserve the first failure as the deterministic overall batch result.
+        if (!hookResult && result)
+            batchStatus = g_lastStatus;
+
+        result = result && hookResult;
+    }
+
+    // Preserve the set API's LastError contract while publishing the overall status.
+    g_lastStatus = batchStatus;
+    SetLastError(callerLastError);
+    return result;
+}
+
+
+/**
+ * @brief Preserves the legacy API by submitting one descriptor to the batch path.
+ * @param[in,out] ppSystemFunction Caller slot receiving the trampoline on success.
+ * @param[in] pHookFunction Replacement function with the target's calling contract.
+ * @return TRUE when the one-request batch succeeds.
+ */
+BOOL Mhook_SetHook(PVOID* ppSystemFunction, PVOID pHookFunction)
+{
+    MHOOK_HOOK_INFO hook = { ppSystemFunction, pHookFunction, MHOOK_STATUS_SUCCESS };
+    return Mhook_SetHookBatch(&hook, 1);
+}
+
+
 //=========================================================================
-BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
+/**
+ * @brief Removes one hook and records the operation status.
+ * @param[in,out] ppHookedFunction Caller slot containing the registered trampoline.
+ * @return TRUE after the target and caller slot are restored.
+ */
+static BOOL unhook(PVOID* ppHookedFunction)
+{
     const DWORD callerLastError = GetLastError();
 
+    // Reject a missing slot before reading caller-owned memory.
     if (!ppHookedFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
@@ -1438,6 +1560,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
         return FALSE;
     }
 
+    // Copy the trampoline from validated writable storage so failure leaves the slot unchanged.
     PVOID pHookedFunction = NULL;
     if (!readWritablePointerSlot(ppHookedFunction, &pHookedFunction))
     {
@@ -1446,6 +1569,7 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
         return FALSE;
     }
 
+    // A writable slot still cannot identify an installed hook without a value.
     if (!pHookedFunction)
     {
         g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
@@ -1458,65 +1582,135 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction) {
 	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
 	MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
 
+	// Serialize registry lookup and target restoration with hook installation.
 	EnterCritSec();
-	// get the trampoline structure that corresponds to our function
+
+	// Resolve only registered trampolines so untrusted pointer values are never dereferenced.
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
-	if (pTrampoline) {
-		// make sure nobody's executing code where we're about to overwrite a few bytes
+
+	if (pTrampoline)
+	{
+		// Move peer instruction pointers away before executable bytes are restored.
 		SuspendOtherThreads(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
 		ODPRINTF((L"mhooks: Mhook_Unhook: found struct at %p", pTrampoline));
 		DWORD dwOldProtectSystemFunction = 0;
-		// Somebody may have patched this prologue after we did. Writing the
-		// original bytes back would silently destroy their patch, so refuse and
-		// leave the target exactly as we found it. The hook stays registered on
-		// purpose: codeUntouched is the only surviving copy of the original
-		// bytes, so discarding it here would make the code unrestorable for
-		// good, and keeping it lets the caller retry once the other writer has
-		// put our patch back.
+
+		// Refuse changed targets because restoring saved bytes would destroy another writer's patch.
+		// Keep the hook registered so its only saved copy of the original bytes remains recoverable.
 		if (memcmp(pTrampoline->pSystemFunction, pTrampoline->codeInstalledPatch,
-				pTrampoline->cbOverwrittenCode) != 0) {
+				pTrampoline->cbOverwrittenCode) != 0)
+		{
 			ODPRINTF((L"mhooks: Mhook_Unhook: %p no longer holds our patch, refusing to restore",
 				pTrampoline->pSystemFunction));
+
 			operationStatus = MHOOK_STATUS_TARGET_MODIFIED;
 			dwError = MHOOK_ERROR_TARGET_MODIFIED;
-		}
-		// make memory writable
-		else if (VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction)) {
+		} // Make an unchanged target writable only while its original bytes are restored.
+		else if (VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction))
+		{
 			ODPRINTF((L"mhooks: Mhook_Unhook: readwrite set on system function"));
 			PBYTE pbCode = (PBYTE)pTrampoline->pSystemFunction;
-			for (DWORD i = 0; i<pTrampoline->cbOverwrittenCode; i++) {
+
+			for (DWORD i = 0; i<pTrampoline->cbOverwrittenCode; i++)
 				pbCode[i] = pTrampoline->codeUntouched[i];
-			}
-			// flush instruction cache and make memory unwritable
+
+			// Publish restored code before reinstating the target's original protection.
 			FlushInstructionCache(GetCurrentProcess(), pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
 			VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
-			// return the original function pointer
+
+			// Restore the caller slot only after the target bytes are valid again.
 			*ppHookedFunction = pTrampoline->pSystemFunction;
             operationStatus = MHOOK_STATUS_SUCCESS;
 			bRet = TRUE;
 			ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
-			// free the trampoline while not really discarding it from memory
+
+			// Retire the trampoline without releasing memory that another thread may still execute.
 			TrampolineFree(pTrampoline, FALSE);
 			ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
-		} else {
-			// keep VirtualProtect's own reason, it is more useful than ours
+		}
+		else
+		{
+			// Preserve VirtualProtect's reason because it identifies the failed system operation.
 			operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 			dwError = gle();
 			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", dwError));
 		}
-		// make the other guys runnable
+
+		// Resume peer threads after executable-memory access is complete.
 		ResumeOtherThreads();
 	}
+
+	// Release serialized state before publishing status and LastError.
 	LeaveCritSec();
 	g_lastStatus = operationStatus;
-	// set this after leaving the critical section so nothing in between can
-	// overwrite the reason we are reporting
+
+	// Set LastError last so cleanup cannot replace the reason returned to the caller.
 	if (bRet)
 		SetLastError(callerLastError);
 	else
 		SetLastError(dwError);
 
 	return operationStatus == MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
+ * @brief Removes each valid batch request through the shared single-unhook workflow.
+ * @param[in,out] hooks Requests to remove and storage for their results.
+ * @param[in] hookCount Number of descriptors in hooks.
+ * @return TRUE only when every request succeeds.
+ */
+BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
+{
+    const DWORD callerLastError = GetLastError();
+    const MHOOK_STATUS validationStatus = validateHookInfoArray(hooks, hookCount);
+
+    // Reject the entire request before any unhook runs when result storage is unusable.
+    if (validationStatus != MHOOK_STATUS_SUCCESS)
+    {
+        g_lastStatus = validationStatus;
+        SetLastError(callerLastError);
+        return FALSE;
+    }
+
+    BOOL result = TRUE;
+    DWORD batchLastError = callerLastError;
+    MHOOK_STATUS batchStatus = MHOOK_STATUS_SUCCESS;
+
+    // Process every request so callers receive a status for each descriptor.
+    for (SIZE_T index = 0; index < hookCount; ++index)
+    {
+        SetLastError(callerLastError);
+        const BOOL hookResult = unhook(hooks[index].ppSystemFunction);
+        const DWORD hookLastError = GetLastError();
+        hooks[index].status = g_lastStatus;
+
+        // Preserve the first failure and its legacy error as the deterministic batch result.
+        if (!hookResult && result)
+        {
+            batchStatus = g_lastStatus;
+            batchLastError = hookLastError;
+        }
+
+        result = result && hookResult;
+    }
+
+    // Publish the overall status and preserve the legacy unhook LastError contract.
+    g_lastStatus = batchStatus;
+    SetLastError(result ? callerLastError : batchLastError);
+    return result;
+}
+
+
+/**
+ * @brief Preserves the legacy API by submitting one descriptor to the batch path.
+ * @param[in,out] ppHookedFunction Caller slot containing the registered trampoline.
+ * @return TRUE when the one-request batch succeeds.
+ */
+BOOL Mhook_Unhook(PVOID* ppHookedFunction)
+{
+    MHOOK_HOOK_INFO hook = { ppHookedFunction, NULL, MHOOK_STATUS_SUCCESS };
+    return Mhook_UnhookBatch(&hook, 1);
 }
 
 //=========================================================================

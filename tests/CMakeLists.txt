@@ -26,6 +26,9 @@ set(statusCases
     invalid_unhook_slot_alignment
     invalid_unhook_slot_access
     invalid_unhook_slot_write
+    invalid_batch
+    invalid_batch_alignment
+    batch_failure_status
     invalid_unhook_address
     not_found
     thread_local
@@ -51,12 +54,12 @@ add_executable(mhook-hook-test hook-test.cpp)
 target_link_libraries(mhook-hook-test PRIVATE mhook::mhook)
 mhook_configure_private_target(mhook-hook-test)
 
-foreach(case IN ITEMS basic trampoline restore conflict passthrough thunk snapshot_boundary short_func threads reuse sweep)
+foreach(case IN ITEMS basic batch trampoline restore conflict passthrough thunk snapshot_boundary short_func threads reuse sweep)
     add_test(NAME mhook.hook.${case} COMMAND mhook-hook-test ${case})
 endforeach()
 
 set_tests_properties(
-    mhook.hook.basic mhook.hook.trampoline mhook.hook.restore
+    mhook.hook.basic mhook.hook.batch mhook.hook.trampoline mhook.hook.restore
     mhook.hook.conflict mhook.hook.passthrough mhook.hook.thunk
     mhook.hook.snapshot_boundary mhook.hook.short_func
     PROPERTIES TIMEOUT 15)

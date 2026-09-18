@@ -151,6 +151,74 @@ static int CaseRestore(void)
     return 0;
 }
 
+
+/**
+ * @brief Verifies that the batch API installs and removes multiple hooks through shared descriptors.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatch(void)
+{
+    const DWORD kInstallLastError = ERROR_ACCESS_DENIED;
+    const DWORD kUnhookLastError = ERROR_BUSY;
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    PBYTE secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+
+    if (!firstTarget || !secondTarget)
+        return Fail("VirtualAlloc for a batch target failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    SetLastError(kInstallLastError);
+    const BOOL installResult = Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks));
+    const DWORD installLastError = GetLastError();
+
+    if (!installResult)
+        return Fail("Mhook_SetHookBatch failed for valid hooks");
+    if (installLastError != kInstallLastError)
+        return Fail("Mhook_SetHookBatch did not preserve the caller's last error");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_SetHookBatch did not report overall success");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_SetHookBatch did not report per-hook success");
+    if (firstTrampoline == firstTarget || secondTrampoline == secondTarget)
+        return Fail("Mhook_SetHookBatch did not publish every trampoline");
+    if (((TargetFn)firstTarget)() != HOOK_RESULT || ((TargetFn)secondTarget)() != HOOK_RESULT)
+        return Fail("a batch target did not reach the hook");
+
+    SetLastError(kUnhookLastError);
+    const BOOL unhookResult = Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks));
+    const DWORD unhookLastError = GetLastError();
+
+    if (!unhookResult)
+        return Fail("Mhook_UnhookBatch failed for valid hooks");
+    if (unhookLastError != kUnhookLastError)
+        return Fail("Mhook_UnhookBatch did not preserve the caller's last error");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_UnhookBatch did not report overall success");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_UnhookBatch did not report per-hook success");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("Mhook_UnhookBatch did not restore every target pointer");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 ||
+        memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("Mhook_UnhookBatch did not restore every target prologue");
+
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
 static int CaseConflict(void)
 {
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
@@ -703,6 +771,7 @@ struct TestCase {
 
 static const TestCase kCases[] = {
     { "basic", CaseBasic },
+    { "batch", caseBatch },
     { "trampoline", CaseTrampoline },
     { "restore", CaseRestore },
     { "conflict", CaseConflict },

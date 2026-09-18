@@ -789,6 +789,163 @@ static int CaseInvalidUnhook(void)
 
 
 /**
+ * @brief Verifies that batch operations reject an empty request without changing LastError.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidBatch(void)
+{
+    const DWORD kCallerLastError = ERROR_ACCESS_DENIED;
+
+    SetLastError(kCallerLastError);
+    if (Mhook_SetHookBatch(NULL, 0))
+        return Fail("Mhook_SetHookBatch accepted an empty batch");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("an empty set batch did not report INVALID_ARGUMENT");
+    if (GetLastError() != kCallerLastError)
+        return Fail("an empty set batch changed the caller's last error");
+
+    SetLastError(kCallerLastError);
+    if (Mhook_UnhookBatch(NULL, 0))
+        return Fail("Mhook_UnhookBatch accepted an empty batch");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("an empty unhook batch did not report INVALID_ARGUMENT");
+    if (GetLastError() != kCallerLastError)
+        return Fail("an empty unhook batch changed the caller's last error");
+
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that batch operations reject a misaligned descriptor array.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidBatchAlignment(void)
+{
+    const DWORD kCallerLastError = ERROR_ACCESS_DENIED;
+    alignas(MHOOK_HOOK_INFO) BYTE storage[sizeof(MHOOK_HOOK_INFO) + 1] = {};
+    MHOOK_HOOK_INFO hook = {};
+    PBYTE target = allocateTarget();
+
+    if (!target)
+        return Fail("VirtualAlloc for the batch alignment target failed");
+
+    PVOID trampoline = target;
+    hook.ppSystemFunction = &trampoline;
+    hook.pHookFunction = reinterpret_cast<PVOID>(&HookReplacement);
+    hook.status = MHOOK_STATUS_SUCCESS;
+    memcpy(storage + 1, &hook, sizeof(hook));
+
+    MHOOK_HOOK_INFO* misalignedHooks = reinterpret_cast<MHOOK_HOOK_INFO*>(storage + 1);
+    SetLastError(kCallerLastError);
+    const BOOL setResult = Mhook_SetHookBatch(misalignedHooks, 1);
+
+    if (setResult)
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_SetHookBatch accepted a misaligned descriptor array");
+    }
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_DESCRIPTOR)
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned set batch did not report INVALID_DESCRIPTOR");
+    }
+    if (GetLastError() != kCallerLastError)
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned set batch changed the caller's last error");
+    }
+    if (trampoline != target)
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned set batch changed the caller's descriptor");
+    }
+
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookReplacement)))
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_SetHook failed while preparing the batch unhook alignment test");
+    }
+
+    hook.ppSystemFunction = &trampoline;
+    memcpy(storage + 1, &hook, sizeof(hook));
+    const PVOID installedTrampoline = trampoline;
+    SetLastError(kCallerLastError);
+    const BOOL unhookResult = Mhook_UnhookBatch(misalignedHooks, 1);
+
+    if (unhookResult)
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_UnhookBatch accepted a misaligned descriptor array");
+    }
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_DESCRIPTOR)
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned unhook batch did not report INVALID_DESCRIPTOR");
+    }
+    if (GetLastError() != kCallerLastError)
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned unhook batch changed the caller's last error");
+    }
+    if (trampoline != installedTrampoline)
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("a misaligned unhook batch changed the caller's descriptor");
+    }
+
+    Mhook_Unhook(&trampoline);
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that batch entry and overall statuses report the operation failure.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchFailureStatus(void)
+{
+    const DWORD kCallerLastError = ERROR_ACCESS_DENIED;
+    PVOID nullTarget = NULL;
+    MHOOK_HOOK_INFO setHook =
+    {
+        &nullTarget,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_SUCCESS
+    };
+
+    SetLastError(kCallerLastError);
+    if (Mhook_SetHookBatch(&setHook, 1))
+        return Fail("Mhook_SetHookBatch accepted a null target");
+    if (setHook.status != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a failed set batch entry reported the wrong status");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a failed set batch reported the wrong overall status");
+    if (GetLastError() != kCallerLastError)
+        return Fail("a failed set batch changed the caller's last error");
+
+    PVOID unknownTarget = reinterpret_cast<PVOID>(&HookTarget);
+    MHOOK_HOOK_INFO unhook = { &unknownTarget, NULL, MHOOK_STATUS_SUCCESS };
+    SetLastError(kCallerLastError);
+    if (Mhook_UnhookBatch(&unhook, 1))
+        return Fail("Mhook_UnhookBatch accepted an unknown hook");
+    if (unhook.status != MHOOK_STATUS_HOOK_NOT_FOUND)
+        return Fail("a failed unhook batch entry reported the wrong status");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_HOOK_NOT_FOUND)
+        return Fail("a failed unhook batch reported the wrong overall status");
+    if (GetLastError() != MHOOK_ERROR_NOT_HOOKED)
+        return Fail("a failed unhook batch did not preserve the legacy error result");
+
+    return 0;
+}
+
+
+/**
  * @brief Verifies that an unowned trampoline value is rejected without being dereferenced.
  * @return Zero on success; otherwise a test failure code.
  */
@@ -916,6 +1073,9 @@ static const StatusTestCase kStatusTestCases[] = {
     { "invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment },
     { "invalid_unhook_slot_access", caseInvalidUnhookSlotAccess },
     { "invalid_unhook_slot_write", caseInvalidUnhookSlotWrite },
+    { "invalid_batch", caseInvalidBatch },
+    { "invalid_batch_alignment", caseInvalidBatchAlignment },
+    { "batch_failure_status", caseBatchFailureStatus },
     { "invalid_unhook_address", caseInvalidUnhookAddress },
     { "not_found", CaseNotFound },
     { "thread_local", CaseThreadLocal },

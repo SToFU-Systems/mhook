@@ -107,6 +107,25 @@ typedef enum MHOOK_STATUS
 
 
 /**
+ * @brief Carries one hook request and its result through batch operations.
+ *
+ * Both batch APIs update the caller-owned function slot, so the same descriptor
+ * array can install and later remove its hooks without being rebuilt.
+ */
+typedef struct MHOOK_HOOK_INFO
+{
+    /** Caller-owned slot that receives the trampoline or restored target. */
+    PVOID* ppSystemFunction;
+
+    /** Replacement used for installation and ignored during removal. */
+    PVOID pHookFunction;
+
+    /** Result written for this request by the most recent batch operation. */
+    MHOOK_STATUS status;
+} MHOOK_HOOK_INFO;
+
+
+/**
  * @name Error codes reported through GetLastError()
  * The values sit in the range Windows reserves for application defined codes.
  * @{
@@ -143,6 +162,20 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
 
 /**
+ * @brief Installs hook requests in order and reports every result.
+ *
+ * This initial batch API reuses the single-hook workflow to preserve its
+ * validation and compatibility behavior. Requests are independent, so an
+ * earlier success is not reverted when a later request fails.
+ *
+ * @param[in,out] hooks Requests to install and storage for their results.
+ * @param[in]     hookCount Number of descriptors in hooks.
+ * @return TRUE when every hook was installed; otherwise FALSE.
+ */
+BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
+
+
+/**
  * @brief Removes a hook and restores the bytes it overwrote.
  *
  * Restores only if the prologue still holds exactly the patch this hook
@@ -169,6 +202,21 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction);
 
 
 /**
+ * @brief Removes hook requests in order and reports every result.
+ *
+ * This initial batch API reuses the single-unhook workflow to preserve its
+ * ownership checks and legacy error behavior. Requests are independent, so an
+ * earlier removal is not reverted when a later request fails.
+ *
+ * @param[in,out] hooks Requests to remove and storage for their results.
+ *        pHookFunction is ignored.
+ * @param[in]     hookCount Number of descriptors in hooks.
+ * @return TRUE when every hook was removed; otherwise FALSE.
+ */
+BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
+
+
+/**
  * @brief Reports which address an installed hook patched.
  *
  * The way to learn which address is contested after Mhook_Unhook() refuses.
@@ -188,9 +236,10 @@ PVOID Mhook_GetTarget(PVOID pHookedFunction);
  *        installation or removal.
  *
  * Each thread owns an independent status initialized to MHOOK_STATUS_SUCCESS.
- * Reading the value does not clear it. The next Mhook_SetHook() or
- * Mhook_Unhook() call on the same thread replaces it, so callers that need a
- * diagnostic should retrieve it immediately after the operation.
+ * Reading the value does not clear it. The next set or unhook operation on the
+ * same thread replaces it, so callers that need a diagnostic should retrieve
+ * it immediately after the operation. For a batch operation, this reports the
+ * overall result; each descriptor reports its own result through status.
  *
  * @return One of the MHOOK_STATUS values describing the latest operation on
  *         the calling thread.
