@@ -31,10 +31,13 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <assert.h>
+#include <ctype.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wctype.h>
 #include "mhook.h"
 #include "../disasm-lib/disasm.h"
 
@@ -63,12 +66,14 @@
 #ifndef ODPRINTF
 
 #ifdef _DEBUG
-#define ODPRINTF(a) odprintf a
+#define ODPRINTF(a) odprintfW a
+#define ODPRINTFA(a) odprintfA a
 #else
 #define ODPRINTF(a)
+#define ODPRINTFA(a)
 #endif
 
-inline void __cdecl odprintf(PCSTR format, ...) {
+static void __cdecl odprintfA(PCSTR format, ...) {
 	va_list	args;
 	va_start(args, format);
 	int len = _vscprintf(format, args);
@@ -90,7 +95,7 @@ inline void __cdecl odprintf(PCSTR format, ...) {
 	}
 }
 
-inline void __cdecl odprintf(PCWSTR format, ...) {
+static void __cdecl odprintfW(PCWSTR format, ...) {
 	va_list	args;
 	va_start(args, format);
 	int len = _vscwprintf(format, args);
@@ -114,13 +119,17 @@ inline void __cdecl odprintf(PCWSTR format, ...) {
 
 #endif //#ifndef ODPRINTF
 
+#ifndef ODPRINTFA
+#define ODPRINTFA(a) ODPRINTF(a)
+#endif
+
 //=========================================================================
 #define MHOOKS_MAX_CODE_BYTES	32
 #define MHOOKS_MAX_RIPS			 4
 
 //=========================================================================
 // The trampoline structure - stores every bit of info about a hook
-struct MHOOKS_TRAMPOLINE {
+typedef struct MHOOKS_TRAMPOLINE {
 	PBYTE	pSystemFunction;								// the original system function
 	DWORD	cbOverwrittenCode;								// number of bytes overwritten by the jump
 	PBYTE	pHookFunction;									// the hook function that we provide
@@ -133,26 +142,26 @@ struct MHOOKS_TRAMPOLINE {
 	BYTE	codeInstalledPatch[MHOOKS_MAX_CODE_BYTES];		// the exact bytes we left in the prologue, so
 															//   Mhook_Unhook can tell our own patch apart
 															//   from one somebody else wrote later
-	MHOOKS_TRAMPOLINE* pPrevTrampoline;						// When in the free list, thess are pointers to the prev and next entry.
-	MHOOKS_TRAMPOLINE* pNextTrampoline;						// When not in the free list, this is a pointer to the prev and next trampoline in use.
-};
+	struct MHOOKS_TRAMPOLINE* pPrevTrampoline;			// When in the free list, thess are pointers to the prev and next entry.
+	struct MHOOKS_TRAMPOLINE* pNextTrampoline;			// When not in the free list, this is a pointer to the prev and next trampoline in use.
+} MHOOKS_TRAMPOLINE;
 
 //=========================================================================
 // The patch data structures - store info about rip-relative instructions
 // during hook placement
-struct MHOOKS_RIPINFO
+typedef struct MHOOKS_RIPINFO
 {
 	DWORD	dwOffset;
 	S64		nDisplacement;
-};
+} MHOOKS_RIPINFO;
 
-struct MHOOKS_PATCHDATA
+typedef struct MHOOKS_PATCHDATA
 {
 	S64				nLimitUp;
 	S64				nLimitDown;
 	DWORD			nRipCnt;
 	MHOOKS_RIPINFO	rips[MHOOKS_MAX_RIPS];
-};
+} MHOOKS_PATCHDATA;
 
 //=========================================================================
 // Global vars
@@ -163,14 +172,17 @@ static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
 static DWORD g_nHooksInUse = 0;
 static HANDLE* g_hThreadHandles = NULL;
 static DWORD g_nThreadHandles = 0;
-static thread_local MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
+static __declspec(thread) MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
 
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
 
-static constexpr DWORD kReadableCodeProtectionMask = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-static constexpr DWORD kReadableProtectionMask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | kReadableCodeProtectionMask;
-static constexpr DWORD kWritableProtectionMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+enum
+{
+    kReadableCodeProtectionMask = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY,
+    kReadableProtectionMask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | kReadableCodeProtectionMask,
+    kWritableProtectionMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+};
 
 //=========================================================================
 // Toolhelp defintions so the functions can be dynamically bound to
@@ -190,10 +202,10 @@ typedef BOOL (WINAPI * _Thread32Next)(
 									  );
 
 //=========================================================================
-// Bring in the toolhelp functions from kernel32
-_CreateToolhelp32Snapshot fnCreateToolhelp32Snapshot = (_CreateToolhelp32Snapshot) GetProcAddress(GetModuleHandle(L"kernel32"), "CreateToolhelp32Snapshot");
-_Thread32First fnThread32First = (_Thread32First) GetProcAddress(GetModuleHandle(L"kernel32"), "Thread32First");
-_Thread32Next fnThread32Next = (_Thread32Next) GetProcAddress(GetModuleHandle(L"kernel32"), "Thread32Next");
+// Toolhelp functions are resolved before thread enumeration.
+static _CreateToolhelp32Snapshot fnCreateToolhelp32Snapshot = NULL;
+static _Thread32First fnThread32First = NULL;
+static _Thread32Next fnThread32Next = NULL;
 
 //=========================================================================
 // Internal function:
@@ -234,7 +246,7 @@ static VOID ListPrepend(MHOOKS_TRAMPOLINE** pListHead, MHOOKS_TRAMPOLINE* pNode)
 }
 
 //=========================================================================
-static VOID EnterCritSec() {
+static VOID EnterCritSec(void) {
 	if (!g_bVarsInitialized) {
 		InitializeCriticalSection(&g_cs);
 		g_bVarsInitialized = TRUE;
@@ -243,8 +255,30 @@ static VOID EnterCritSec() {
 }
 
 //=========================================================================
-static VOID LeaveCritSec() {
+static VOID LeaveCritSec(void) {
 	LeaveCriticalSection(&g_cs);
+}
+
+
+/**
+ * @brief Loads the Toolhelp functions required for thread enumeration.
+ * @return TRUE when every required function is available.
+ */
+static BOOL loadToolhelpFunctions(void)
+{
+    if (fnCreateToolhelp32Snapshot && fnThread32First && fnThread32Next)
+        return TRUE;
+
+    HMODULE kernel32Module = GetModuleHandleW(L"kernel32");
+
+    if (!kernel32Module)
+        return FALSE;
+
+    fnCreateToolhelp32Snapshot = (_CreateToolhelp32Snapshot)GetProcAddress(kernel32Module, "CreateToolhelp32Snapshot");
+    fnThread32First = (_Thread32First)GetProcAddress(kernel32Module, "Thread32First");
+    fnThread32Next = (_Thread32Next)GetProcAddress(kernel32Module, "Thread32Next");
+
+    return fnCreateToolhelp32Snapshot && fnThread32First && fnThread32Next;
 }
 
 /**
@@ -260,7 +294,7 @@ static SIZE_T readMemoryPrefix(const void* source, SIZE_T maximumSize, DWORD pro
     assert(destination);
     assert(maximumSize);
 
-    const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>(source);
+    const uintptr_t sourceAddress = (uintptr_t)source;
 
     if (!sourceAddress || maximumSize > UINTPTR_MAX - sourceAddress)
         return 0;
@@ -271,8 +305,8 @@ static SIZE_T readMemoryPrefix(const void* source, SIZE_T maximumSize, DWORD pro
     // Find the consecutive prefix covered by allowed memory regions.
     while (currentAddress < endAddress)
     {
-        MEMORY_BASIC_INFORMATION memory = {};
-        const SIZE_T querySize = VirtualQuery(reinterpret_cast<const void*>(currentAddress), &memory, sizeof(memory));
+        MEMORY_BASIC_INFORMATION memory = { 0 };
+        const SIZE_T querySize = VirtualQuery((const void*)currentAddress, &memory, sizeof(memory));
 
         if (querySize != sizeof(memory))
             break;
@@ -284,7 +318,7 @@ static SIZE_T readMemoryPrefix(const void* source, SIZE_T maximumSize, DWORD pro
         if (!isCommitted || isGuarded || !hasAllowedProtection)
             break;
 
-        const uintptr_t regionAddress = reinterpret_cast<uintptr_t>(memory.BaseAddress);
+        const uintptr_t regionAddress = (uintptr_t)memory.BaseAddress;
 
         if (regionAddress > currentAddress || memory.RegionSize > UINTPTR_MAX - regionAddress)
             break;
@@ -338,8 +372,8 @@ static BOOL readWritablePointerSlot(PVOID* slot, OUT PVOID* value)
     assert(slot);
     assert(value);
 
-    const uintptr_t slotAddress = reinterpret_cast<uintptr_t>(slot);
-    const BOOL isAligned = slotAddress % alignof(PVOID) == 0;
+    const uintptr_t slotAddress = (uintptr_t)slot;
+    const BOOL isAligned = slotAddress % _Alignof(PVOID) == 0;
 
     if (!isAligned)
         return FALSE;
@@ -384,7 +418,7 @@ static BOOL calculateRelativeAddress(PBYTE instruction, SIZE_T instructionSize, 
     assert(instruction);
     assert(address);
 
-    const uintptr_t instructionAddress = reinterpret_cast<uintptr_t>(instruction);
+    const uintptr_t instructionAddress = (uintptr_t)instruction;
     const int64_t signedDisplacement = displacement;
 
     if (instructionSize > UINTPTR_MAX - instructionAddress)
@@ -394,27 +428,27 @@ static BOOL calculateRelativeAddress(PBYTE instruction, SIZE_T instructionSize, 
 
     if (signedDisplacement < 0)
     {
-        const uint64_t magnitude = static_cast<uint64_t>(-signedDisplacement);
+        const uint64_t magnitude = (uint64_t)-signedDisplacement;
 
         if (magnitude > resultAddress)
             return FALSE;
 
-        resultAddress -= static_cast<uintptr_t>(magnitude);
+        resultAddress -= (uintptr_t)magnitude;
     }
     else
     {
-        const uint64_t magnitude = static_cast<uint64_t>(signedDisplacement);
+        const uint64_t magnitude = (uint64_t)signedDisplacement;
 
         if (magnitude > UINTPTR_MAX - resultAddress)
             return FALSE;
 
-        resultAddress += static_cast<uintptr_t>(magnitude);
+        resultAddress += (uintptr_t)magnitude;
     }
 
     if (!resultAddress)
         return FALSE;
 
-    *address = reinterpret_cast<PBYTE>(resultAddress);
+    *address = (PBYTE)resultAddress;
     return TRUE;
 }
 
@@ -431,22 +465,28 @@ static MHOOK_STATUS resolveIndirectJump(PBYTE instruction, BOOL hasRexPrefix, OU
 	assert(instruction);
 	assert(nextFunction);
 
-    const uint8_t kIndirectJumpOperand = 0x25;
-    const SIZE_T kIndirectOpcodeSize = 2;
-    const SIZE_T kIndirectJumpSize = 6;
-    const SIZE_T kIndirectDisplacementOffset = 2;
-    const SIZE_T kMaximumJumpSize = 7;
+    enum
+    {
+        kIndirectJumpOperand = 0x25,
+        kIndirectOpcodeSize = 2,
+        kIndirectJumpSize = 6,
+        kIndirectDisplacementOffset = 2,
+        kMaximumJumpSize = 7
+    };
 
 #ifdef _M_X64
-    const uint8_t kIndirectJumpOpcode = 0xFF;
-    const SIZE_T kRexOpcodeSize = 3;
-    const SIZE_T kRexIndirectJumpSize = 7;
-    const SIZE_T kRexIndirectDisplacementOffset = 3;
+    enum
+    {
+        kIndirectJumpOpcode = 0xFF,
+        kRexOpcodeSize = 3,
+        kRexIndirectJumpSize = 7,
+        kRexIndirectDisplacementOffset = 3
+    };
 #endif // _M_X64
 
     SIZE_T jumpSize = kIndirectJumpSize;
     SIZE_T displacementOffset = kIndirectDisplacementOffset;
-    uint8_t code[kMaximumJumpSize] = {};
+    uint8_t code[kMaximumJumpSize] = { 0 };
 
     if (!hasRexPrefix)
     {
@@ -487,7 +527,7 @@ static MHOOK_STATUS resolveIndirectJump(PBYTE instruction, BOOL hasRexPrefix, OU
 #ifdef _M_IX86
     uint32_t slotAddress = 0;
     memcpy(&slotAddress, code + displacementOffset, sizeof(slotAddress));
-    pointerSlot = reinterpret_cast<PBYTE>(static_cast<uintptr_t>(slotAddress));
+    pointerSlot = (PBYTE)(uintptr_t)slotAddress;
 #elif defined _M_X64
     int32_t displacement = 0;
     memcpy(&displacement, code + displacementOffset, sizeof(displacement));
@@ -520,11 +560,14 @@ static MHOOK_STATUS resolveRelativeJump(PBYTE instruction, BOOL isNearJump, OUT 
 	assert(instruction);
 	assert(nextFunction);
 
-    const SIZE_T kNearJumpSize = 5;
-    const SIZE_T kShortJumpSize = 2;
+    enum
+    {
+        kNearJumpSize = 5,
+        kShortJumpSize = 2
+    };
     const SIZE_T jumpSize = isNearJump ? kNearJumpSize : kShortJumpSize;
 
-    uint8_t code[kNearJumpSize] = {};
+    uint8_t code[kNearJumpSize] = { 0 };
 
     if (!readMemory(instruction, jumpSize, kReadableCodeProtectionMask, code))
         return MHOOK_STATUS_INVALID_TARGET;
@@ -558,12 +601,18 @@ static MHOOK_STATUS resolveSingleJump(PBYTE function, OUT PBYTE* nextFunction)
 	assert(function);
 	assert(nextFunction);
 
-    const uint8_t kNearJumpOpcode = 0xE9;
-    const uint8_t kShortJumpOpcode = 0xEB;
-    const uint8_t kIndirectJumpOpcode = 0xFF;
+    enum
+    {
+        kNearJumpOpcode = 0xE9,
+        kShortJumpOpcode = 0xEB,
+        kIndirectJumpOpcode = 0xFF
+    };
 
 #ifdef _M_X64
-    const uint8_t kRexPrefix = 0x48;
+    enum
+    {
+        kRexPrefix = 0x48
+    };
 #endif // _M_X64
 
 #ifdef _M_IX86
@@ -575,7 +624,7 @@ static MHOOK_STATUS resolveSingleJump(PBYTE function, OUT PBYTE* nextFunction)
     PBYTE instruction = function;
 
 #ifdef _M_IX86
-    uint8_t entryBytes[sizeof(kCollapsedFrameSequence)] = {};
+    uint8_t entryBytes[sizeof(kCollapsedFrameSequence)] = { 0 };
 
     // Preserve jumps placed after the x86 hot-patch sequence.
     if (!readMemory(instruction, 1, kReadableCodeProtectionMask, entryBytes))
@@ -644,9 +693,12 @@ static MHOOK_STATUS resolveFunctionTarget(PBYTE function, OUT PBYTE* target)
 	assert(function);
 	assert(target);
 
-    const SIZE_T kMaximumJumpDepth = 16;
+    enum
+    {
+        kMaximumJumpDepth = 16
+    };
 
-    PBYTE visitedFunctions[kMaximumJumpDepth + 1] = {};
+    PBYTE visitedFunctions[kMaximumJumpDepth + 1] = { 0 };
     PBYTE currentFunction = function;
 
 	*target = NULL;
@@ -771,7 +823,7 @@ static size_t RoundDown(size_t addr, size_t rndDown)
 //=========================================================================
 static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE pbUpper) {
 	SYSTEM_INFO sSysInfo =  {0};
-	::GetSystemInfo(&sSysInfo);
+	GetSystemInfo(&sSysInfo);
 
 	// Always allocate in bulk, in case the system actually has a smaller allocation granularity than MINALLOCSIZE.
 	const ptrdiff_t cAllocSize = max(sSysInfo.dwAllocationGranularity, MHOOK_MINALLOCSIZE);
@@ -978,7 +1030,7 @@ static HANDLE SuspendOneThread(DWORD dwThreadId, PBYTE pbCode, DWORD cbBytes) {
 //
 // Resumes all previously suspended threads in the current process.
 //=========================================================================
-static VOID ResumeOtherThreads() {
+static VOID ResumeOtherThreads(void) {
 	// make sure things go as fast as possible
 	INT nOriginalPriority = GetThreadPriority(GetCurrentThread());
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1003,6 +1055,9 @@ static VOID ResumeOtherThreads() {
 //=========================================================================
 static BOOL SuspendOtherThreads(PBYTE pbCode, DWORD cbBytes) {
 	BOOL bRet = FALSE;
+	if (!loadToolhelpFunctions())
+		return FALSE;
+
 	// make sure we're the most important thread in the process
 	INT nOriginalPriority = GetThreadPriority(GetCurrentThread());
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1106,7 +1161,7 @@ static void FixupIPRelativeAddressing(PBYTE pbNew, PBYTE pbOriginal, MHOOKS_PATC
  */
 static MHOOK_STATUS DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, OUT MHOOKS_PATCHDATA* pdata, OUT DWORD* instructionLength)
 {
-    U8 snapshot[MHOOKS_MAX_CODE_BYTES] = {};
+    U8 snapshot[MHOOKS_MAX_CODE_BYTES] = { 0 };
     DWORD dwRet = 0;
     MHOOK_STATUS status = MHOOK_STATUS_INVALID_TARGET;
 
@@ -1138,14 +1193,14 @@ static MHOOK_STATUS DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, OUT MHOO
 
 	if (InitDisassembler(&dis, arch))
 	{
-		U8* pLoc = static_cast<U8*>(pFunction);
+		U8* pLoc = (U8*)pFunction;
         U8* snapshotLocation = snapshot;
         DWORD dwFlags = DISASM_DECODE | DISASM_DISASSEMBLE | DISASM_ALIGNOUTPUT;
 
 		ODPRINTF((L"mhooks: DisassembleAndSkip: Disassembling %p", pLoc));
         while (dwRet < dwMinLen)
         {
-            INSTRUCTION* pins = GetInstruction(&dis, reinterpret_cast<ULONG_PTR>(pLoc), snapshotLocation, dwFlags);
+            INSTRUCTION* pins = GetInstruction(&dis, (ULONG_PTR)pLoc, snapshotLocation, dwFlags);
 
             if (!pins)
             {
@@ -1162,7 +1217,7 @@ static MHOOK_STATUS DisassembleAndSkip(PVOID pFunction, DWORD dwMinLen, OUT MHOO
             }
 
 			status = MHOOK_STATUS_UNSUPPORTED_PROLOGUE;
-			ODPRINTF(("mhooks: DisassembleAndSkip: %p:(0x%2.2x) %s", pLoc, pins->Length, pins->String));
+			ODPRINTFA(("mhooks: DisassembleAndSkip: %p:(0x%2.2x) %s", pLoc, pins->Length, pins->String));
 			if (pins->Type == ITYPE_RET		) break;
 			if (pins->Type == ITYPE_BRANCH	) break;
 			if (pins->Type == ITYPE_BRANCHCC) break;
@@ -1295,7 +1350,7 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction) {
     PBYTE resolvedSystemFunction = NULL;
     PBYTE resolvedHookFunction = NULL;
 
-    MHOOK_STATUS operationStatus = resolveHookRequest(static_cast<PBYTE>(pSystemFunction), static_cast<PBYTE>(pHookFunction), &resolvedSystemFunction, &resolvedHookFunction);
+    MHOOK_STATUS operationStatus = resolveHookRequest((PBYTE)pSystemFunction, (PBYTE)pHookFunction, &resolvedSystemFunction, &resolvedHookFunction);
 
     if (operationStatus != MHOOK_STATUS_SUCCESS)
     {

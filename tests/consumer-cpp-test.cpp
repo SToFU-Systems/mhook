@@ -14,11 +14,18 @@
 #error mhook.h must not expose the private architecture macro
 #endif
 
-// Volatile references keep both API symbols in optimized link checks.
-static BOOL (*volatile set_hook)(PVOID*, PVOID) = &Mhook_SetHook;
-static BOOL (*volatile remove_hook)(PVOID*) = &Mhook_Unhook;
+static BOOL (*volatile setHook)(PVOID*, PVOID) = &Mhook_SetHook;
+static BOOL (*volatile removeHook)(PVOID*) = &Mhook_Unhook;
+static PVOID (*volatile getTarget)(PVOID) = &Mhook_GetTarget;
+static MHOOK_STATUS (*volatile getLastStatus)(void) = &Mhook_GetLastStatus;
 
+
+/**
+ * @brief Verifies the public API from a C++ consumer.
+ *
+ * @return Zero on success; otherwise nonzero.
+ */
 int main(void)
 {
-    return (set_hook && remove_hook) ? 0 : 1;
+    return (setHook && removeHook && getTarget && getLastStatus) ? 0 : 1;
 }
