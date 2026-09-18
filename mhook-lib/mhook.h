@@ -191,8 +191,8 @@ BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
  *        failure, so a refused call can be retried with the same pointer.
  * @return TRUE if the original bytes were restored. On success, the caller's
  *         GetLastError value is preserved.
- * @retval FALSE Invalid arguments and descriptors preserve GetLastError.
- *         Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
+ * @retval FALSE Invalid arguments, descriptors, and inaccessible targets
+ *         preserve GetLastError. Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
  *         MHOOK_ERROR_NOT_HOOKED, or the code from the failed VirtualProtect.
  *
  * @warning The trampoline is not freed, since a thread may still be running in

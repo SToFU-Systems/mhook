@@ -417,6 +417,82 @@ static MHOOK_STATUS validateHookInfoArray(MHOOK_HOOK_INFO* hooks, SIZE_T hookCou
 
 
 /**
+ * @brief Carries the library status and legacy Win32 error for one unhook attempt.
+ */
+typedef struct UnhookResult
+{
+    MHOOK_STATUS status;
+    DWORD lastError;
+} UnhookResult;
+
+
+/**
+ * @brief Verifies that a hook target still contains Mhook's installed patch.
+ * @param[in] trampoline Registered trampoline describing the target and patch.
+ * @return SUCCESS when the patch matches, INVALID_TARGET when the target cannot be read, or TARGET_MODIFIED when its bytes differ.
+ */
+static MHOOK_STATUS validateInstalledPatch(const MHOOKS_TRAMPOLINE* trampoline)
+{
+    assert(trampoline);
+
+    const DWORD patchSize = trampoline->cbOverwrittenCode;
+    BYTE livePatch[MHOOKS_MAX_CODE_BYTES] = { 0 };
+
+    assert(patchSize <= sizeof(livePatch));
+
+    // Copy through validated access so an inaccessible target cannot crash unhook.
+    if (!readMemory(trampoline->pSystemFunction, patchSize, kReadableCodeProtectionMask, livePatch))
+        return MHOOK_STATUS_INVALID_TARGET;
+
+    // Refuse restoration when another writer has replaced Mhook's patch.
+    if (memcmp(livePatch, trampoline->codeInstalledPatch, patchSize) != 0)
+        return MHOOK_STATUS_TARGET_MODIFIED;
+
+    return MHOOK_STATUS_SUCCESS;
+}
+
+
+/**
+ * @brief Restores the original target bytes when Mhook still owns the installed patch.
+ * @param[in] trampoline Registered trampoline containing the original target bytes.
+ * @param[in] callerLastError Error value to preserve when validation fails.
+ * @return Detailed unhook status and corresponding LastError value.
+ */
+static UnhookResult restoreHookTarget(MHOOKS_TRAMPOLINE* trampoline, DWORD callerLastError)
+{
+    assert(trampoline);
+
+    const DWORD patchSize = trampoline->cbOverwrittenCode;
+    UnhookResult result = { 0 };
+    result.status = validateInstalledPatch(trampoline);
+    result.lastError = callerLastError;
+
+    if (result.status == MHOOK_STATUS_TARGET_MODIFIED)
+    {
+        result.lastError = MHOOK_ERROR_TARGET_MODIFIED;
+        return result;
+    }
+
+    if (result.status != MHOOK_STATUS_SUCCESS)
+        return result;
+
+    // Make the target writable only while restoring its original bytes.
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(trampoline->pSystemFunction, patchSize, PAGE_EXECUTE_READWRITE, &oldProtection))
+    {
+        result.status = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
+        result.lastError = GetLastError();
+        return result;
+    }
+
+    memcpy(trampoline->pSystemFunction, trampoline->codeUntouched, patchSize);
+    FlushInstructionCache(GetCurrentProcess(), trampoline->pSystemFunction, patchSize);
+    VirtualProtect(trampoline->pSystemFunction, patchSize, oldProtection, &oldProtection);
+    return result;
+}
+
+
+/**
  * @brief Finds an active hook by its resolved target address.
  * @param[in] targetFunction Resolved target address to find.
  * @return The registered trampoline, or NULL when the target is not hooked.
@@ -1643,57 +1719,31 @@ static BOOL unhook(PVOID* ppHookedFunction)
 	// Resolve only registered trampolines so untrusted pointer values are never dereferenced.
 	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
 
-	if (pTrampoline)
-	{
-		// Move peer instruction pointers away before executable bytes are restored.
-		SuspendOtherThreads(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
-		ODPRINTF((L"mhooks: Mhook_Unhook: found struct at %p", pTrampoline));
-		DWORD dwOldProtectSystemFunction = 0;
+    if (pTrampoline)
+    {
+        // Move peer instruction pointers away before executable bytes are restored.
+        SuspendOtherThreads(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
+        ODPRINTF((L"mhooks: Mhook_Unhook: found struct at %p", pTrampoline));
 
-		// Refuse changed targets because restoring saved bytes would destroy another writer's patch.
-		// Keep the hook registered so its only saved copy of the original bytes remains recoverable.
-		if (memcmp(pTrampoline->pSystemFunction, pTrampoline->codeInstalledPatch,
-				pTrampoline->cbOverwrittenCode) != 0)
-		{
-			ODPRINTF((L"mhooks: Mhook_Unhook: %p no longer holds our patch, refusing to restore",
-				pTrampoline->pSystemFunction));
+        const UnhookResult result = restoreHookTarget(pTrampoline, callerLastError);
+        operationStatus = result.status;
+        dwError = result.lastError;
 
-			operationStatus = MHOOK_STATUS_TARGET_MODIFIED;
-			dwError = MHOOK_ERROR_TARGET_MODIFIED;
-		} // Make an unchanged target writable only while its original bytes are restored.
-		else if (VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, PAGE_EXECUTE_READWRITE, &dwOldProtectSystemFunction))
-		{
-			ODPRINTF((L"mhooks: Mhook_Unhook: readwrite set on system function"));
-			PBYTE pbCode = (PBYTE)pTrampoline->pSystemFunction;
+        if (operationStatus == MHOOK_STATUS_SUCCESS)
+        {
+            // Publish success only after the target bytes have been restored.
+            *ppHookedFunction = pTrampoline->pSystemFunction;
+            bRet = TRUE;
+            ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
 
-			for (DWORD i = 0; i<pTrampoline->cbOverwrittenCode; i++)
-				pbCode[i] = pTrampoline->codeUntouched[i];
+            // Retire the trampoline without releasing memory that another thread may still execute.
+            TrampolineFree(pTrampoline, FALSE);
+            ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
+        }
 
-			// Publish restored code before reinstating the target's original protection.
-			FlushInstructionCache(GetCurrentProcess(), pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode);
-			VirtualProtect(pTrampoline->pSystemFunction, pTrampoline->cbOverwrittenCode, dwOldProtectSystemFunction, &dwOldProtectSystemFunction);
-
-			// Restore the caller slot only after the target bytes are valid again.
-			*ppHookedFunction = pTrampoline->pSystemFunction;
-            operationStatus = MHOOK_STATUS_SUCCESS;
-			bRet = TRUE;
-			ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
-
-			// Retire the trampoline without releasing memory that another thread may still execute.
-			TrampolineFree(pTrampoline, FALSE);
-			ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
-		}
-		else
-		{
-			// Preserve VirtualProtect's reason because it identifies the failed system operation.
-			operationStatus = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
-			dwError = gle();
-			ODPRINTF((L"mhooks: Mhook_Unhook: failed VirtualProtect 1: %d", dwError));
-		}
-
-		// Resume peer threads after executable-memory access is complete.
-		ResumeOtherThreads();
-	}
+        // Resume peer threads after executable-memory access is complete.
+        ResumeOtherThreads();
+    }
 
 	// Release serialized state before publishing status and LastError.
 	LeaveCritSec();

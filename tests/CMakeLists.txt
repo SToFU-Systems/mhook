@@ -26,6 +26,7 @@ set(statusCases
     invalid_unhook_slot_alignment
     invalid_unhook_slot_access
     invalid_unhook_slot_write
+    invalid_unhook_target_access
     invalid_batch
     invalid_batch_alignment
     batch_failure_status

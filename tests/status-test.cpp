@@ -741,6 +741,77 @@ static int caseInvalidUnhookSlotWrite(void)
     return result;
 }
 
+
+/**
+ * @brief Verifies that unhook rejects an inaccessible target without losing the registered hook.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseInvalidUnhookTargetAccess(void)
+{
+    const DWORD kCallerLastError = ERROR_ACCESS_DENIED;
+    PBYTE target = allocateTarget();
+
+    if (!target)
+        return Fail("VirtualAlloc for the inaccessible unhook target failed");
+
+    BYTE originalBytes[kTargetBufferSize] = {};
+    memcpy(originalBytes, target, sizeof(originalBytes));
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookReplacement)))
+    {
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("Mhook_SetHook failed while preparing the inaccessible unhook target");
+    }
+
+    BYTE installedBytes[kTargetBufferSize] = {};
+    memcpy(installedBytes, target, sizeof(installedBytes));
+
+    const PVOID installedTrampoline = trampoline;
+    DWORD targetProtection = 0;
+    if (!VirtualProtect(target, kTargetBufferSize, PAGE_NOACCESS, &targetProtection))
+    {
+        Mhook_Unhook(&trampoline);
+        VirtualFree(target, 0, MEM_RELEASE);
+        return Fail("VirtualProtect could not make the hooked target inaccessible");
+    }
+
+    SetLastError(kCallerLastError);
+    const BOOL unhookResult = Mhook_Unhook(&trampoline);
+    const MHOOK_STATUS unhookStatus = Mhook_GetLastStatus();
+    const DWORD unhookLastError = GetLastError();
+
+    DWORD ignoredProtection = 0;
+    if (!VirtualProtect(target, kTargetBufferSize, targetProtection, &ignoredProtection))
+        return Fail("VirtualProtect could not restore access to the hooked target");
+
+    const BOOL descriptorPreserved = trampoline == installedTrampoline;
+    const BOOL registryPreserved = Mhook_GetTarget(installedTrampoline) == target;
+    const BOOL targetPreserved = memcmp(target, installedBytes, sizeof(installedBytes)) == 0;
+    const BOOL retryResult = !unhookResult && Mhook_Unhook(&trampoline);
+    const BOOL targetRestored = memcmp(target, originalBytes, sizeof(originalBytes)) == 0;
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (unhookResult)
+        return Fail("Mhook_Unhook accepted an inaccessible hooked target");
+    if (unhookStatus != MHOOK_STATUS_INVALID_TARGET)
+        return Fail("an inaccessible hooked target did not report INVALID_TARGET");
+    if (unhookLastError != kCallerLastError)
+        return Fail("an inaccessible hooked target changed the caller's last error");
+    if (!descriptorPreserved)
+        return Fail("an inaccessible hooked target changed the caller's descriptor");
+    if (!registryPreserved)
+        return Fail("an inaccessible hooked target was removed from the registry");
+    if (!targetPreserved)
+        return Fail("an inaccessible hooked target was modified");
+    if (!retryResult)
+        return Fail("Mhook_Unhook could not retry after target access was restored");
+    if (trampoline != target || !targetRestored)
+        return Fail("a retried unhook did not restore the target state");
+
+    return 0;
+}
+
 static int CaseInitial(void)
 {
     if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
@@ -1073,6 +1144,7 @@ static const StatusTestCase kStatusTestCases[] = {
     { "invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment },
     { "invalid_unhook_slot_access", caseInvalidUnhookSlotAccess },
     { "invalid_unhook_slot_write", caseInvalidUnhookSlotWrite },
+    { "invalid_unhook_target_access", caseInvalidUnhookTargetAccess },
     { "invalid_batch", caseInvalidBatch },
     { "invalid_batch_alignment", caseInvalidBatchAlignment },
     { "batch_failure_status", caseBatchFailureStatus },
