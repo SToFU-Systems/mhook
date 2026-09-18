@@ -40,15 +40,41 @@ foreach(case IN LISTS statusCases)
 endforeach()
 
 foreach(language IN ITEMS c cpp)
-    add_executable(mhook-header-${language}-test header-${language}-test.${language})
-    target_link_libraries(mhook-header-${language}-test PRIVATE mhook::mhook)
-    # Match the warning baseline without inheriting private build definitions.
+    add_executable(mhook-consumer-static-${language}-test consumer-${language}-test.${language})
+    target_link_libraries(mhook-consumer-static-${language}-test PRIVATE mhook::mhook)
+    # Verify that the public header compiles cleanly without private settings.
     if(MHOOK_COMPILER_MSVC)
-        target_compile_options(mhook-header-${language}-test PRIVATE /W3 /WX)
+        target_compile_options(mhook-consumer-static-${language}-test PRIVATE /W3 /WX)
     endif()
-    add_test(NAME mhook.header.${language} COMMAND mhook-header-${language}-test)
-    set_tests_properties(mhook.header.${language} PROPERTIES TIMEOUT 15)
+    add_test(NAME mhook.consumer.static.${language} COMMAND mhook-consumer-static-${language}-test)
+    set_tests_properties(mhook.consumer.static.${language} PROPERTIES TIMEOUT 15)
 endforeach()
+
+set(directSources
+    "${PROJECT_SOURCE_DIR}/mhook-lib/mhook.c"
+    "${PROJECT_SOURCE_DIR}/disasm-lib/cpu.c"
+    "${PROJECT_SOURCE_DIR}/disasm-lib/disasm.c"
+    "${PROJECT_SOURCE_DIR}/disasm-lib/disasm_x86.c"
+    "${PROJECT_SOURCE_DIR}/disasm-lib/misc.c"
+)
+
+add_executable(mhook-consumer-direct-c-test
+    consumer-c-test.c
+    ${directSources}
+)
+target_include_directories(mhook-consumer-direct-c-test PRIVATE "${PROJECT_SOURCE_DIR}")
+target_compile_features(mhook-consumer-direct-c-test PRIVATE c_std_11)
+
+if(MHOOK_COMPILER_MSVC)
+    target_compile_options(mhook-consumer-direct-c-test PRIVATE /W3)
+endif()
+
+if(NOT MHOOK_ENABLE_SANITY_CHECKS)
+    target_compile_definitions(mhook-consumer-direct-c-test PRIVATE NO_SANITY_CHECKS)
+endif()
+
+add_test(NAME mhook.consumer.direct.c COMMAND mhook-consumer-direct-c-test)
+set_tests_properties(mhook.consumer.direct.c PROPERTIES TIMEOUT 15)
 
 add_executable(mhook-hook-test hook-test.cpp)
 target_link_libraries(mhook-hook-test PRIVATE mhook::mhook)
