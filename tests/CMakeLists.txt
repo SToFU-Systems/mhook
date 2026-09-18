@@ -85,6 +85,11 @@ foreach(case IN ITEMS basic batch trampoline restore conflict passthrough thunk 
     add_test(NAME mhook.hook.${case} COMMAND mhook-hook-test ${case})
 endforeach()
 
+if(MHOOK_ARCHITECTURE STREQUAL "x64")
+    add_test(NAME mhook.hook.pool COMMAND mhook-hook-test pool)
+    set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
+endif()
+
 set_tests_properties(
     mhook.hook.basic mhook.hook.batch mhook.hook.trampoline mhook.hook.restore
     mhook.hook.conflict mhook.hook.passthrough mhook.hook.thunk

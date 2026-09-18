@@ -169,7 +169,6 @@ static BOOL g_bVarsInitialized = FALSE;
 static CRITICAL_SECTION g_cs;
 static MHOOKS_TRAMPOLINE* g_pHooks = NULL;
 static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
-static DWORD g_nHooksInUse = 0;
 static HANDLE* g_hThreadHandles = NULL;
 static DWORD g_nThreadHandles = 0;
 static __declspec(thread) MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
@@ -964,8 +963,13 @@ static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE
 					pRetVal[s].pNextTrampoline = &pRetVal[s + 1];
 				}
 
-				// last entry points to the current head of the free list
-				pRetVal[trampolineCount - 1].pNextTrampoline = g_pFreeList;
+				MHOOKS_TRAMPOLINE* lastTrampoline = &pRetVal[trampolineCount - 1];
+
+				// Join the new block to the existing free list in both directions.
+				lastTrampoline->pNextTrampoline = g_pFreeList;
+
+				if (g_pFreeList)
+					g_pFreeList->pPrevTrampoline = lastTrampoline;
 				break;
 			}
 		}
@@ -1076,7 +1080,6 @@ static VOID TrampolineFree(MHOOKS_TRAMPOLINE* pTrampoline, BOOL bNeverUsed) {
 		ListPrepend(&g_pFreeList, pTrampoline);
 	}
 
-	g_nHooksInUse--;
 }
 
 //=========================================================================

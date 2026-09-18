@@ -48,9 +48,9 @@ static volatile LONG g_hookCalls = 0;
 // has no other way to reach the trampoline it calls through.
 static PVOID g_trampoline = NULL;
 
-static PBYTE AllocCodeBuffer(const BYTE* code, size_t length)
+static PBYTE AllocCodeBuffer(const BYTE* code, size_t length, PVOID address = NULL)
 {
-    PBYTE buffer = (PBYTE)VirtualAlloc(NULL, TARGET_BUFFER_SIZE,
+    PBYTE buffer = (PBYTE)VirtualAlloc(address, TARGET_BUFFER_SIZE,
                                        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (buffer) {
         memset(buffer, 0xCC, TARGET_BUFFER_SIZE);
@@ -633,6 +633,88 @@ static int CaseReuse(void)
     return 0;
 }
 
+
+#ifdef _M_X64
+/**
+ * @brief Verifies that alternating distant targets never expose an active trampoline as free.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseTrampolinePoolBookkeeping(void)
+{
+    static const uintptr_t kNearbyTargetOffset = UINT64_C(0x0000000000020000);
+    static const uintptr_t kTargetAddressPairs[][2] =
+    {
+        { UINT64_C(0x0000000200000000), UINT64_C(0x0000000600000000) },
+        { UINT64_C(0x0000000A00000000), UINT64_C(0x0000000E00000000) },
+        { UINT64_C(0x0000001200000000), UINT64_C(0x0000001600000000) }
+    };
+
+    PBYTE firstTarget = NULL;
+    PBYTE nearbyTarget = NULL;
+    PBYTE secondTarget = NULL;
+
+    for (size_t index = 0; index < ARRAYSIZE(kTargetAddressPairs); ++index)
+    {
+        firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][0]));
+
+        if (!firstTarget)
+            continue;
+
+        nearbyTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][0] + kNearbyTargetOffset));
+        secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][1]));
+
+        if (nearbyTarget && secondTarget)
+            break;
+
+        VirtualFree(firstTarget, 0, MEM_RELEASE);
+        if (nearbyTarget)
+            VirtualFree(nearbyTarget, 0, MEM_RELEASE);
+        if (secondTarget)
+            VirtualFree(secondTarget, 0, MEM_RELEASE);
+
+        firstTarget = NULL;
+        nearbyTarget = NULL;
+        secondTarget = NULL;
+    }
+
+    if (!firstTarget || !nearbyTarget || !secondTarget)
+        return Fail("VirtualAlloc could not reserve distant trampoline-pool targets");
+
+    PBYTE initialTargets[] = { firstTarget, secondTarget };
+
+    for (size_t index = 0; index < ARRAYSIZE(initialTargets); ++index)
+    {
+        PVOID trampoline = initialTargets[index];
+
+        if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+            return Fail("Mhook_SetHook failed while exercising distant trampoline pools");
+
+        if (!Mhook_Unhook(&trampoline))
+            return Fail("Mhook_Unhook failed while exercising distant trampoline pools");
+    }
+
+    PVOID firstTrampoline = firstTarget;
+    if (!Mhook_SetHook(&firstTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed while reserving the first nearby trampoline");
+
+    PVOID nearbyTrampoline = nearbyTarget;
+    if (!Mhook_SetHook(&nearbyTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed while reserving the second nearby trampoline");
+
+    if (firstTrampoline == nearbyTrampoline)
+        return Fail("the same trampoline was reserved for two active hooks");
+
+    if (!Mhook_Unhook(&nearbyTrampoline) || !Mhook_Unhook(&firstTrampoline))
+        return Fail("Mhook_Unhook failed while cleaning up the trampoline pool test");
+
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(nearbyTarget, 0, MEM_RELEASE);
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+
+    return 0;
+}
+#endif // _M_X64
+
 // Mirrors the patterns the entry-point resolver follows, without following them.
 static bool PrologueJumpsElsewhere(const BYTE* code)
 {
@@ -781,6 +863,9 @@ static const TestCase kCases[] = {
     { "short_func", CaseShortFunc },
     { "threads", CaseThreads },
     { "reuse", CaseReuse },
+#ifdef _M_X64
+    { "pool", caseTrampolinePoolBookkeeping },
+#endif // _M_X64
     { "sweep", CaseSweep },
 };
 
