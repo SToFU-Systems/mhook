@@ -636,7 +636,7 @@ static int CaseReuse(void)
 
 #ifdef _M_X64
 /**
- * @brief Verifies that alternating distant targets never expose an active trampoline as free.
+ * @brief Verifies distant routing and prevents active trampolines from reentering the free list.
  * @return Zero on success; otherwise a test failure code.
  */
 static int caseTrampolinePoolBookkeeping(void)
@@ -688,6 +688,13 @@ static int caseTrampolinePoolBookkeeping(void)
 
         if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
             return Fail("Mhook_SetHook failed while exercising distant trampoline pools");
+
+        // Execute the distant route through its nearby stub before removing the hook.
+        g_hookCalls = 0;
+        if (reinterpret_cast<TargetFn>(initialTargets[index])() != HOOK_RESULT)
+            return Fail("calling a distant target did not reach the hook");
+        if (g_hookCalls != 1)
+            return Fail("the distant target called the hook an unexpected number of times");
 
         if (!Mhook_Unhook(&trampoline))
             return Fail("Mhook_Unhook failed while exercising distant trampoline pools");
