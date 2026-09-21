@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(mhook LANGUAGES C CXX)
 
+include(GNUInstallDirs)
 include(cmake/MhookPlatform.cmake)
 
 option(BUILD_TESTING "Build tests" ${PROJECT_IS_TOP_LEVEL})
@@ -10,6 +11,7 @@ option(MHOOK_ENABLE_SANITY_CHECKS "Enable decoder checks" ON)
 
 add_subdirectory(disasm-lib)
 add_subdirectory(mhook-lib)
+include(cmake/MhookInstall.cmake)
 
 if(MHOOK_BUILD_EXAMPLES)
     add_subdirectory(examples)
