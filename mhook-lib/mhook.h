@@ -86,7 +86,7 @@ typedef enum MHOOK_STATUS
     /** An instruction-cache flush for modified code failed. */
     MHOOK_STATUS_PATCH_FAILED = 8,
 
-    /** Another writer modified the target after the hook was installed. */
+    /** Live target bytes no longer match the image retained by Mhook. */
     MHOOK_STATUS_TARGET_MODIFIED = 9,
 
     /** The caller's function-pointer slot is misaligned, unreadable, or unwritable. */
@@ -101,7 +101,7 @@ typedef enum MHOOK_STATUS
     /** Following entry-point jumps exceeded the supported depth. */
     MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13,
 
-    /** A function-resolution chain reached a target with an active hook. */
+    /** A resolved request conflicts with an active hook or another batch entry. */
     MHOOK_STATUS_ALREADY_HOOKED = 14
 } MHOOK_STATUS;
 
@@ -162,11 +162,16 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
 
 /**
- * @brief Installs hook requests in order and reports every result.
+ * @brief Atomically installs a batch of hook requests.
  *
- * This initial batch API reuses the single-hook workflow to preserve its
- * validation and compatibility behavior. Requests are independent, so an
- * earlier success is not reverted when a later request fails.
+ * Every request is resolved, decoded, checked for conflicts, and assigned a
+ * trampoline before any target is modified. The batch then installs every
+ * patch while peer threads are suspended. A later commit failure restores all
+ * earlier patches, leaving caller slots and the active-hook registry unchanged.
+ *
+ * A SUCCESS entry in a failed batch means that request was valid and did not
+ * cause the failure; it was not published. The failing entry carries the
+ * diagnostic status, which is also returned by Mhook_GetLastStatus().
  *
  * @param[in,out] hooks Requests to install and storage for their results.
  * @param[in]     hookCount Number of descriptors in hooks.

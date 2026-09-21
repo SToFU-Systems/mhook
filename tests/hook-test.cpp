@@ -60,6 +60,54 @@ static PBYTE AllocCodeBuffer(const BYTE* code, size_t length, PVOID address = NU
     return buffer;
 }
 
+
+/**
+ * @brief Creates executable code whose mapped view cannot be made writable.
+ * @param[in] code Bytes copied into the mapped target.
+ * @param[in] length Number of bytes copied from code.
+ * @param[out] mapping Mapping handle that owns the returned view.
+ * @return Executable read-only view, or NULL when setup fails.
+ */
+static PBYTE allocateReadOnlyCodeBuffer(const BYTE* code, size_t length, OUT HANDLE* mapping)
+{
+    // Create writable backing storage so the test code can be initialized once.
+    *mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_EXECUTE_READWRITE, 0, TARGET_BUFFER_SIZE, NULL);
+    if (!*mapping)
+        return NULL;
+
+    PBYTE writableView = static_cast<PBYTE>(MapViewOfFile(*mapping, FILE_MAP_WRITE, 0, 0, TARGET_BUFFER_SIZE));
+    if (!writableView)
+    {
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    memset(writableView, 0xCC, TARGET_BUFFER_SIZE);
+    memcpy(writableView, code, length);
+
+    // Exclude write access from the target view so hook commit cannot change its protection.
+    PBYTE executableView = static_cast<PBYTE>(MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_EXECUTE, 0, 0, TARGET_BUFFER_SIZE));
+    UnmapViewOfFile(writableView);
+
+    if (!executableView)
+    {
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    if (!FlushInstructionCache(GetCurrentProcess(), executableView, TARGET_BUFFER_SIZE))
+    {
+        UnmapViewOfFile(executableView);
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    return executableView;
+}
+
 static bool IsJumpPatched(const BYTE* code)
 {
     return code[0] == 0xE9 || (code[0] == 0xFF && code[1] == 0x25);
@@ -560,6 +608,173 @@ static DWORD WINAPI SpinCallingTarget(LPVOID parameter)
         if (result != TARGET_RESULT && result != HOOK_RESULT)
             InterlockedIncrement(&g_badResults);
     }
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that a preparation failure leaves every batch hook unpublished.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchPrepareFailure(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the batch preparation target failed");
+
+    BYTE snapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+
+    // Place a valid request before an invalid one to detect eager installation.
+    PVOID firstTrampoline = target;
+    PVOID invalidTarget = NULL;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &invalidTarget, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_SUCCESS }
+    };
+
+    if (Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch accepted an invalid request");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a preparation failure did not identify the invalid request");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a preparation failure reported the wrong overall status");
+    if (firstTrampoline != target)
+        return Fail("a preparation failure published an earlier trampoline");
+    if (memcmp(target, snapshot, sizeof(snapshot)) != 0)
+        return Fail("a preparation failure patched an earlier target");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that conflicting prepared requests abort the whole batch.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchConflict(void)
+{
+    PBYTE duplicateTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!duplicateTarget)
+        return Fail("VirtualAlloc for the duplicate batch target failed");
+
+    BYTE duplicateSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(duplicateSnapshot, duplicateTarget, sizeof(duplicateSnapshot));
+
+    // A replacement inside its own overwritten prologue would be destroyed by installation.
+    PVOID selfConflictTrampoline = duplicateTarget;
+    MHOOK_HOOK_INFO selfConflictHook =
+    {
+        &selfConflictTrampoline,
+        duplicateTarget + 1,
+        MHOOK_STATUS_INVALID_ARGUMENT
+    };
+
+    if (Mhook_SetHookBatch(&selfConflictHook, 1))
+        return Fail("Mhook_SetHookBatch accepted a replacement inside its own target");
+    if (selfConflictHook.status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a self-range conflict reported the wrong status");
+    if (selfConflictTrampoline != duplicateTarget)
+        return Fail("a self-range conflict published a trampoline");
+    if (memcmp(duplicateTarget, duplicateSnapshot, sizeof(duplicateSnapshot)) != 0)
+        return Fail("a self-range conflict changed the target bytes");
+
+    // Two caller slots that resolve to the same target cannot be installed atomically.
+    PVOID firstDuplicateTrampoline = duplicateTarget;
+    PVOID secondDuplicateTrampoline = duplicateTarget;
+    MHOOK_HOOK_INFO duplicateHooks[] =
+    {
+        { &firstDuplicateTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondDuplicateTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(duplicateHooks, ARRAYSIZE(duplicateHooks)))
+        return Fail("Mhook_SetHookBatch accepted duplicate resolved targets");
+    if (duplicateHooks[0].status != MHOOK_STATUS_SUCCESS || duplicateHooks[1].status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a duplicate batch target did not identify the conflicting request");
+    if (firstDuplicateTrampoline != duplicateTarget || secondDuplicateTrampoline != duplicateTarget)
+        return Fail("a duplicate batch target published a trampoline");
+    if (memcmp(duplicateTarget, duplicateSnapshot, sizeof(duplicateSnapshot)) != 0)
+        return Fail("a duplicate batch target changed the target bytes");
+
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    PBYTE secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!firstTarget || !secondTarget)
+        return Fail("VirtualAlloc for replacement-conflict targets failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    // A replacement cannot point into code that another request will overwrite.
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO replacementHooks[] =
+    {
+        { &firstTrampoline, secondTarget, MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(replacementHooks, ARRAYSIZE(replacementHooks)))
+        return Fail("Mhook_SetHookBatch accepted a replacement inside another target");
+    if (replacementHooks[0].status != MHOOK_STATUS_SUCCESS || replacementHooks[1].status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a replacement conflict did not identify the conflicting request");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("a replacement conflict published a trampoline");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 || memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("a replacement conflict changed target bytes");
+
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(duplicateTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that a commit failure restores every earlier hook in the batch.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchCommitFailure(void)
+{
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    HANDLE secondMapping = NULL;
+    PBYTE secondTarget = allocateReadOnlyCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), &secondMapping);
+
+    if (!firstTarget || !secondTarget)
+        return Fail("mapped target setup for the batch commit test failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    // Force the second commit to fail after the first request is ready to install.
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch installed a read-only mapped target");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("a commit failure did not identify the unwritable request");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("a commit failure reported the wrong overall status");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("a commit failure published a batch trampoline");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 || memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("a commit failure left a batch target patched");
+
+    UnmapViewOfFile(secondTarget);
+    CloseHandle(secondMapping);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
     return 0;
 }
 
@@ -1081,6 +1296,9 @@ struct TestCase {
 static const TestCase kCases[] = {
     { "basic", CaseBasic },
     { "batch", caseBatch },
+    { "batch_prepare_failure", caseBatchPrepareFailure },
+    { "batch_conflict", caseBatchConflict },
+    { "batch_commit_failure", caseBatchCommitFailure },
     { "trampoline", CaseTrampoline },
     { "restore", CaseRestore },
     { "conflict", CaseConflict },

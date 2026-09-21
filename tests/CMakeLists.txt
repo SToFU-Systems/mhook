@@ -88,6 +88,9 @@ mhook_configure_private_target(mhook-hook-test)
 set(hookCases
     basic
     batch
+    batch_prepare_failure
+    batch_conflict
+    batch_commit_failure
     trampoline
     restore
     conflict
