@@ -1053,6 +1053,38 @@ static BOOL peerSuspensionsWereReleased(const HANDLE* threads, SIZE_T threadCoun
     return allThreadsWereRunning;
 }
 
+
+/**
+ * @brief Disables the privilege that bypasses thread DACL checks on elevated runners.
+ * @return TRUE when the privilege is disabled or absent from the process token.
+ */
+static BOOL disableDebugPrivilege(void)
+{
+    HANDLE processToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &processToken))
+        return FALSE;
+
+    BOOL result = FALSE;
+    LUID debugPrivilege = {};
+    if (LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &debugPrivilege))
+    {
+        TOKEN_PRIVILEGES privileges = {};
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Luid = debugPrivilege;
+
+        SetLastError(ERROR_SUCCESS);
+        result = AdjustTokenPrivileges(processToken, FALSE, &privileges, 0, NULL, NULL);
+        const DWORD privilegeError = GetLastError();
+        if (result)
+            result = privilegeError == ERROR_SUCCESS || privilegeError == ERROR_NOT_ALL_ASSIGNED;
+    }
+
+    if (!CloseHandle(processToken))
+        result = FALSE;
+
+    return result;
+}
+
 static int CaseThreads(void)
 {
     const int kWorkerCount = 4;
@@ -1154,6 +1186,10 @@ static int caseSuspensionFailure(void)
 {
     const SIZE_T kWorkerCount = 2;
     const SIZE_T kRestrictedWorkerIndex = 1;
+
+    // Make the worker DACL effective even when CI enables SeDebugPrivilege.
+    if (!disableDebugPrivilege())
+        return Fail("disabling SeDebugPrivilege for the suspension failure case failed");
 
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
     if (!target)
