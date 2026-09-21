@@ -1859,26 +1859,40 @@ static MHOOK_STATUS installPreparedHook(MHOOKS_TRAMPOLINE* trampoline)
     if (!VirtualProtect(trampoline->pSystemFunction, patchSize, PAGE_EXECUTE_READWRITE, &originalProtection))
         return MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
 
-    // Write and flush the prepared patch while the target remains writable.
+    // Write and flush the prepared patch while retaining the determining Win32 error.
+    DWORD lastError = ERROR_SUCCESS;
     memcpy(trampoline->pSystemFunction, trampoline->codeInstalledPatch, patchSize);
     if (!FlushInstructionCache(GetCurrentProcess(), trampoline->pSystemFunction, patchSize))
+    {
         status = MHOOK_STATUS_PATCH_FAILED;
+        lastError = GetLastError();
+    }
 
     DWORD writableProtection = 0;
-    if (status == MHOOK_STATUS_SUCCESS && VirtualProtect(trampoline->pSystemFunction, patchSize, originalProtection, &writableProtection))
-        return MHOOK_STATUS_SUCCESS;
-
     if (status == MHOOK_STATUS_SUCCESS)
+    {
+        if (VirtualProtect(trampoline->pSystemFunction, patchSize, originalProtection, &writableProtection))
+            return MHOOK_STATUS_SUCCESS;
+
         status = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
+        lastError = GetLastError();
+    }
 
     // A failed commit restores its own target before the batch rolls back earlier patches.
     memcpy(trampoline->pSystemFunction, trampoline->codeUntouched, patchSize);
     if (!FlushInstructionCache(GetCurrentProcess(), trampoline->pSystemFunction, patchSize))
+    {
         status = MHOOK_STATUS_PATCH_FAILED;
+        lastError = GetLastError();
+    }
 
     if (!VirtualProtect(trampoline->pSystemFunction, patchSize, originalProtection, &writableProtection))
+    {
         status = MHOOK_STATUS_MEMORY_PROTECTION_FAILED;
+        lastError = GetLastError();
+    }
 
+    SetLastError(lastError);
     return status;
 }
 
@@ -2080,111 +2094,267 @@ BOOL Mhook_SetHook(PVOID* ppSystemFunction, PVOID pHookFunction)
 
 //=========================================================================
 /**
- * @brief Removes one hook and records the operation status.
- * @param[in,out] ppHookedFunction Caller slot containing the registered trampoline.
- * @return TRUE after the target and caller slot are restored.
+ * @brief Validates one removal request without changing its target or caller slot.
+ * @param[in] hookedFunctionSlot Caller slot containing a registered trampoline.
+ * @param[in] callerLastError Error value preserved for validation failures.
+ * @param[out] preparedTrampoline Active trampoline ready for removal on success.
+ * @return Detailed validation status and corresponding LastError value.
+ * @remark The caller must hold the hook registry critical section.
  */
-static BOOL unhook(PVOID* ppHookedFunction)
+static UnhookResult prepareUnhook(PVOID* hookedFunctionSlot, DWORD callerLastError, OUT MHOOKS_TRAMPOLINE** preparedTrampoline)
 {
-    const DWORD callerLastError = GetLastError();
+    assert(preparedTrampoline);
+
+    UnhookResult result = { MHOOK_STATUS_SUCCESS, callerLastError };
 
     // Reject a missing slot before reading caller-owned memory.
-    if (!ppHookedFunction)
+    if (!hookedFunctionSlot)
     {
-        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
-        SetLastError(callerLastError);
-        return FALSE;
+        result.status = MHOOK_STATUS_INVALID_ARGUMENT;
+        return result;
     }
 
-    // Copy the trampoline from validated writable storage so failure leaves the slot unchanged.
-    PVOID pHookedFunction = NULL;
-    if (!readWritablePointerSlot(ppHookedFunction, &pHookedFunction))
+    // Read through validated writable storage so failure leaves the slot unchanged.
+    PVOID hookedFunction = NULL;
+    if (!readWritablePointerSlot(hookedFunctionSlot, &hookedFunction))
     {
-        g_lastStatus = MHOOK_STATUS_INVALID_DESCRIPTOR;
-        SetLastError(callerLastError);
-        return FALSE;
+        result.status = MHOOK_STATUS_INVALID_DESCRIPTOR;
+        return result;
     }
 
-    // A writable slot still cannot identify an installed hook without a value.
-    if (!pHookedFunction)
+    if (!hookedFunction)
     {
-        g_lastStatus = MHOOK_STATUS_INVALID_ARGUMENT;
-        SetLastError(callerLastError);
-        return FALSE;
+        result.status = MHOOK_STATUS_INVALID_ARGUMENT;
+        return result;
     }
 
-	ODPRINTF((L"mhooks: Mhook_Unhook: %p", pHookedFunction));
-	BOOL bRet = FALSE;
-	DWORD dwError = MHOOK_ERROR_NOT_HOOKED;
-	MHOOK_STATUS operationStatus = MHOOK_STATUS_HOOK_NOT_FOUND;
-
-	// Serialize registry lookup and target restoration with hook installation.
-	EnterCritSec();
-
-	// Resolve only registered trampolines so untrusted pointer values are never dereferenced.
-	MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
-
-    if (pTrampoline)
+    // Resolve only registered trampolines so untrusted pointer values are never dereferenced.
+    MHOOKS_TRAMPOLINE* trampoline = TrampolineGet((PBYTE)hookedFunction);
+    if (!trampoline)
     {
-        ODPRINTF((L"mhooks: Mhook_Unhook: found struct at %p", pTrampoline));
-
-        MHOOKS_TRAMPOLINE* trampolines[] = { pTrampoline };
-        ThreadSuspension suspension = { 0 };
-        operationStatus = suspendOtherThreads(trampolines, 1, &suspension);
-
-        if (operationStatus == MHOOK_STATUS_SUCCESS)
-        {
-            const UnhookResult result = restoreHookTarget(pTrampoline, callerLastError);
-            operationStatus = result.status;
-            dwError = result.lastError;
-
-            if (operationStatus == MHOOK_STATUS_SUCCESS)
-            {
-                // Publish success only after the target bytes have been restored.
-                *ppHookedFunction = pTrampoline->pSystemFunction;
-                bRet = TRUE;
-                ODPRINTF((L"mhooks: Mhook_Unhook: sysfunc: %p", *ppHookedFunction));
-
-                // Retire the trampoline without releasing memory that another thread may still execute.
-                retireTrampoline(pTrampoline);
-                ODPRINTF((L"mhooks: Mhook_Unhook: unhook successful"));
-            }
-
-            // Resume peer threads after executable-memory access is complete.
-            resumeOtherThreads(&suspension);
-        }
-        else
-        {
-            dwError = GetLastError();
-        }
+        result.status = MHOOK_STATUS_HOOK_NOT_FOUND;
+        result.lastError = MHOOK_ERROR_NOT_HOOKED;
+        return result;
     }
 
-	// Release serialized state before publishing status and LastError.
-	LeaveCritSec();
-	g_lastStatus = operationStatus;
+    result.status = validateInstalledPatch(trampoline);
 
-	// Set LastError last so cleanup cannot replace the reason returned to the caller.
-	if (bRet)
-		SetLastError(callerLastError);
-	else
-		SetLastError(dwError);
+    if (result.status == MHOOK_STATUS_TARGET_MODIFIED)
+        result.lastError = MHOOK_ERROR_TARGET_MODIFIED;
 
-	return operationStatus == MHOOK_STATUS_SUCCESS;
+    if (result.status == MHOOK_STATUS_SUCCESS)
+        *preparedTrampoline = trampoline;
+
+    return result;
 }
 
 
 /**
- * @brief Removes each valid batch request through the shared single-unhook workflow.
+ * @brief Prepares every removal and rejects repeated trampolines before code is changed.
+ * @param[in] hookCount Number of descriptors and output entries.
+ * @param[in] callerLastError Error value preserved for validation failures.
+ * @param[in,out] hooks Requests receiving their preparation status.
+ * @param[out] preparedTrampolines Active trampoline for each successful request, otherwise NULL.
+ * @return The first preparation failure, or SUCCESS when the complete batch is ready.
+ * @remark The caller must hold the hook registry critical section.
+ */
+static UnhookResult prepareUnhookBatch(SIZE_T hookCount, DWORD callerLastError, MHOOK_HOOK_INFO* hooks, OUT MHOOKS_TRAMPOLINE** preparedTrampolines)
+{
+    assert(hookCount);
+    assert(hooks);
+    assert(preparedTrampolines);
+
+    UnhookResult batchResult = { MHOOK_STATUS_SUCCESS, callerLastError };
+
+    // Prepare every descriptor so callers receive an independent diagnostic status.
+    for (SIZE_T index = 0; index < hookCount; ++index)
+    {
+        MHOOKS_TRAMPOLINE* trampoline = NULL;
+        UnhookResult result = prepareUnhook(hooks[index].ppSystemFunction, callerLastError, &trampoline);
+
+        // One active hook can participate in the transaction only once.
+        if (result.status == MHOOK_STATUS_SUCCESS)
+        {
+            for (SIZE_T previousIndex = 0; previousIndex < index; ++previousIndex)
+            {
+                const BOOL isRepeated = preparedTrampolines[previousIndex] == trampoline;
+
+                if (isRepeated)
+                {
+                    result.status = MHOOK_STATUS_INVALID_ARGUMENT;
+                    trampoline = NULL;
+                    break;
+                }
+            }
+        }
+
+        preparedTrampolines[index] = trampoline;
+        hooks[index].status = result.status;
+
+        if (batchResult.status == MHOOK_STATUS_SUCCESS && result.status != MHOOK_STATUS_SUCCESS)
+            batchResult = result;
+    }
+
+    return batchResult;
+}
+
+
+/**
+ * @brief Reinstalls every patch restored before a later removal failed.
+ * @param[in] restoredCount Number of leading targets containing original bytes.
+ * @param[in] callerLastError Error value preserved when rollback succeeds.
+ * @param[in] preparedTrampolines Active hooks corresponding to hooks.
+ * @param[in,out] hooks Requests receiving any rollback failures.
+ * @return The first rollback failure and its LastError, or SUCCESS when every patch was reinstalled.
+ */
+static UnhookResult rollbackUnhookBatch(SIZE_T restoredCount, DWORD callerLastError, MHOOKS_TRAMPOLINE** preparedTrampolines, MHOOK_HOOK_INFO* hooks)
+{
+    assert(restoredCount);
+    assert(hooks);
+    assert(preparedTrampolines);
+
+    UnhookResult result = { MHOOK_STATUS_SUCCESS, callerLastError };
+
+    // Reverse restoration order while attempting every patch reinstallation.
+    for (SIZE_T remaining = restoredCount; remaining > 0; --remaining)
+    {
+        const SIZE_T index = remaining - 1;
+        SetLastError(callerLastError);
+        const MHOOK_STATUS status = installPreparedHook(preparedTrampolines[index]);
+        const DWORD lastError = GetLastError();
+
+        if (status != MHOOK_STATUS_SUCCESS)
+        {
+            hooks[index].status = status;
+
+            if (result.status == MHOOK_STATUS_SUCCESS)
+            {
+                result.status = status;
+                result.lastError = lastError;
+            }
+        }
+    }
+
+    return result;
+}
+
+
+/**
+ * @brief Restores every prepared target and publishes removals only after complete success.
+ * @param[in] hookCount Number of prepared removals.
+ * @param[in] callerLastError Error value preserved when the transaction succeeds.
+ * @param[in] preparedTrampolines Complete prepared batch in descriptor order.
+ * @param[in,out] hooks Requests receiving commit or rollback failures.
+ * @return Detailed transaction status and corresponding LastError value.
+ * @remark The caller must hold the hook registry critical section.
+ */
+static UnhookResult commitUnhookBatch(SIZE_T hookCount, DWORD callerLastError, MHOOKS_TRAMPOLINE** preparedTrampolines, MHOOK_HOOK_INFO* hooks)
+{
+    assert(hookCount);
+    assert(hooks);
+    assert(preparedTrampolines);
+
+    UnhookResult result = { MHOOK_STATUS_SUCCESS, callerLastError };
+    ThreadSuspension suspension = { 0 };
+    result.status = suspendOtherThreads(preparedTrampolines, hookCount, &suspension);
+
+    if (result.status != MHOOK_STATUS_SUCCESS)
+    {
+        result.lastError = GetLastError();
+
+        for (SIZE_T index = 0; index < hookCount; ++index)
+            hooks[index].status = result.status;
+
+        return result;
+    }
+
+    // Restore targets in descriptor order and stop at the first failed removal.
+    SIZE_T restoredCount = 0;
+    for (SIZE_T index = 0; index < hookCount; ++index)
+    {
+        result = restoreHookTarget(preparedTrampolines[index], callerLastError);
+        if (result.status != MHOOK_STATUS_SUCCESS)
+        {
+            hooks[index].status = result.status;
+            break;
+        }
+
+        ++restoredCount;
+    }
+
+    if (result.status == MHOOK_STATUS_SUCCESS)
+    {
+        // Publish caller slots and registry removals only after every target is restored.
+        for (SIZE_T index = 0; index < hookCount; ++index)
+        {
+            *hooks[index].ppSystemFunction = preparedTrampolines[index]->pSystemFunction;
+            retireTrampoline(preparedTrampolines[index]);
+        }
+    }
+    else if (restoredCount)
+    {
+        const UnhookResult rollbackResult = rollbackUnhookBatch(restoredCount, callerLastError, preparedTrampolines, hooks);
+        if (rollbackResult.status != MHOOK_STATUS_SUCCESS)
+            result = rollbackResult;
+    }
+
+    // Resume peers only after publication or rollback has completed.
+    resumeOtherThreads(&suspension);
+    return result;
+}
+
+
+/**
+ * @brief Owns preparation and commit for one atomic removal batch.
+ * @param[in] hookCount Number of validated descriptors.
+ * @param[in] callerLastError Error value preserved when the transaction succeeds.
+ * @param[in,out] hooks Requests receiving per-hook results and restored targets.
+ * @return Detailed transaction status and corresponding LastError value.
+ */
+static UnhookResult removeHookBatch(SIZE_T hookCount, DWORD callerLastError, MHOOK_HOOK_INFO* hooks)
+{
+    assert(hookCount);
+    assert(hooks);
+
+    UnhookResult result = { MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED, ERROR_NOT_ENOUGH_MEMORY };
+
+    // Allocate only the pointer storage retained between transaction phases.
+    MHOOKS_TRAMPOLINE** preparedTrampolines = malloc(hookCount * sizeof(*preparedTrampolines));
+
+    if (!preparedTrampolines)
+    {
+        for (SIZE_T index = 0; index < hookCount; ++index)
+            hooks[index].status = result.status;
+
+        return result;
+    }
+
+    // Serialize registry reads, target restoration, and publication.
+    EnterCritSec();
+
+    result = prepareUnhookBatch(hookCount, callerLastError, hooks, preparedTrampolines);
+
+    if (result.status == MHOOK_STATUS_SUCCESS)
+        result = commitUnhookBatch(hookCount, callerLastError, preparedTrampolines, hooks);
+
+    LeaveCritSec();
+    free(preparedTrampolines);
+    return result;
+}
+
+
+/**
+ * @brief Atomically removes a validated batch or leaves every hook published.
  * @param[in,out] hooks Requests to remove and storage for their results.
  * @param[in] hookCount Number of descriptors in hooks.
- * @return TRUE only when every request succeeds.
+ * @return TRUE only when every hook is removed.
  */
 BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
 {
     const DWORD callerLastError = GetLastError();
     const MHOOK_STATUS validationStatus = validateHookInfoArray(hooks, hookCount);
 
-    // Reject the entire request before any unhook runs when result storage is unusable.
+    // Reject the complete transaction when its descriptor storage cannot be used.
     if (validationStatus != MHOOK_STATUS_SUCCESS)
     {
         g_lastStatus = validationStatus;
@@ -2192,32 +2362,12 @@ BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
         return FALSE;
     }
 
-    BOOL result = TRUE;
-    DWORD batchLastError = callerLastError;
-    MHOOK_STATUS batchStatus = MHOOK_STATUS_SUCCESS;
+    const UnhookResult result = removeHookBatch(hookCount, callerLastError, hooks);
 
-    // Process every request so callers receive a status for each descriptor.
-    for (SIZE_T index = 0; index < hookCount; ++index)
-    {
-        SetLastError(callerLastError);
-        const BOOL hookResult = unhook(hooks[index].ppSystemFunction);
-        const DWORD hookLastError = GetLastError();
-        hooks[index].status = g_lastStatus;
-
-        // Preserve the first failure and its legacy error as the deterministic batch result.
-        if (!hookResult && result)
-        {
-            batchStatus = g_lastStatus;
-            batchLastError = hookLastError;
-        }
-
-        result = result && hookResult;
-    }
-
-    // Publish the overall status and preserve the legacy unhook LastError contract.
-    g_lastStatus = batchStatus;
-    SetLastError(result ? callerLastError : batchLastError);
-    return result;
+    // Publish the overall result after all serialized cleanup is complete.
+    g_lastStatus = result.status;
+    SetLastError(result.status == MHOOK_STATUS_SUCCESS ? callerLastError : result.lastError);
+    return result.status == MHOOK_STATUS_SUCCESS;
 }
 
 

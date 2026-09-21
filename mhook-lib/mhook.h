@@ -62,7 +62,7 @@ typedef enum MHOOK_STATUS
     /** No monitored operation reported a failure. */
     MHOOK_STATUS_SUCCESS = 0,
 
-    /** A required address is NULL, or the resolved target and replacement are identical. */
+    /** A required address is NULL, resolved functions are identical, or a removal is repeated in one batch. */
     MHOOK_STATUS_INVALID_ARGUMENT = 1,
 
     /** The target prologue could not be decoded. */
@@ -207,11 +207,16 @@ BOOL Mhook_Unhook(PVOID *ppHookedFunction);
 
 
 /**
- * @brief Removes hook requests in order and reports every result.
+ * @brief Atomically removes a batch of hook requests.
  *
- * This initial batch API reuses the single-unhook workflow to preserve its
- * ownership checks and legacy error behavior. Requests are independent, so an
- * earlier removal is not reverted when a later request fails.
+ * Every caller slot and installed patch is validated before any target is
+ * modified. The batch then restores every target while peer threads are
+ * suspended. A later removal failure reinstalls all earlier patches, leaving
+ * caller slots and the active-hook registry unchanged.
+ *
+ * A SUCCESS entry in a failed batch means that request was valid and did not
+ * cause the failure; it was not removed. The failing entry carries the
+ * diagnostic status, which is also returned by Mhook_GetLastStatus().
  *
  * @param[in,out] hooks Requests to remove and storage for their results.
  *        pHookFunction is ignored.

@@ -91,6 +91,9 @@ set(hookCases
     batch_prepare_failure
     batch_conflict
     batch_commit_failure
+    batch_unhook_prepare_failure
+    batch_unhook_conflict
+    batch_unhook_commit_failure
     trampoline
     restore
     conflict
