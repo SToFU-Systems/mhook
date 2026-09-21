@@ -563,8 +563,57 @@ static DWORD WINAPI SpinCallingTarget(LPVOID parameter)
     return 0;
 }
 
+
+/**
+ * @brief Keeps a peer alive without entering the target code used by suspension tests.
+ * @return Zero after the test requests worker shutdown.
+ */
+static DWORD WINAPI waitForStop(LPVOID)
+{
+    while (!g_stopThreads)
+        Sleep(1);
+    return 0;
+}
+
+
+/**
+ * @brief Checks and clears suspension counts left by a failed hook transaction.
+ * @param[in] threads Worker handles created by the test.
+ * @param[in] threadCount Number of handles in threads.
+ * @return TRUE when every worker was running before the check.
+ */
+static BOOL peerSuspensionsWereReleased(const HANDLE* threads, SIZE_T threadCount)
+{
+    BOOL allThreadsWereRunning = TRUE;
+
+    for (SIZE_T index = 0; index < threadCount; ++index)
+    {
+        const DWORD previousSuspendCount = SuspendThread(threads[index]);
+        if (previousSuspendCount == (DWORD)-1)
+        {
+            allThreadsWereRunning = FALSE;
+            continue;
+        }
+
+        for (DWORD resumeIndex = 0; resumeIndex <= previousSuspendCount; ++resumeIndex)
+        {
+            if (ResumeThread(threads[index]) == (DWORD)-1)
+                allThreadsWereRunning = FALSE;
+        }
+
+        if (previousSuspendCount != 0)
+            allThreadsWereRunning = FALSE;
+    }
+
+    return allThreadsWereRunning;
+}
+
 static int CaseThreads(void)
 {
+    const int kWorkerCount = 4;
+    const int kRoundCount = 25;
+    const int kOperationRetryCount = 16;
+
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
     if (!target)
         return Fail("VirtualAlloc for the target buffer failed");
@@ -572,14 +621,17 @@ static int CaseThreads(void)
     g_stopThreads = 0;
     g_badResults = 0;
 
-    HANDLE threads[4];
-    for (int i = 0; i < 4; ++i) {
+    HANDLE threads[kWorkerCount] = {};
+    for (int i = 0; i < kWorkerCount; ++i)
+    {
         threads[i] = CreateThread(NULL, 0, SpinCallingTarget, target, 0, NULL);
-        if (!threads[i]) {
+        if (!threads[i])
+        {
             // Stop and join whatever already started before bailing out, so the
             // case never returns while threads are still running on the buffer.
             InterlockedExchange(&g_stopThreads, 1);
-            if (i > 0) {
+            if (i > 0)
+            {
                 WaitForMultipleObjects(i, threads, TRUE, INFINITE);
                 for (int j = 0; j < i; ++j)
                     CloseHandle(threads[j]);
@@ -589,25 +641,193 @@ static int CaseThreads(void)
     }
 
     int status = 0;
-    // Each iteration hooks and unhooks while four threads hammer the target.
-    const int rounds = Exhaustive() ? 100 : 25;
-    for (int i = 0; i < rounds && status == 0; ++i) {
-        PVOID trampoline = target;
-        if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
-            status = Fail("Mhook_SetHook failed while other threads were running");
-        else if (!Mhook_Unhook(&trampoline))
-            status = Fail("Mhook_Unhook failed while other threads were running");
+    PVOID trampoline = target;
+    const int rounds = Exhaustive() ? 100 : kRoundCount;
+
+    // Complete every round while workers repeatedly enter the patch range.
+    for (int round = 0; round < rounds && status == 0; ++round)
+    {
+        BOOL hookResult = FALSE;
+        for (int attempt = 0; attempt < kOperationRetryCount && !hookResult; ++attempt)
+        {
+            hookResult = Mhook_SetHook(&trampoline, (PVOID)&HookCounting);
+            if (!hookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+                status = Fail("Mhook_SetHook failed unexpectedly while other threads were running");
+            else if (!hookResult && trampoline != target)
+                status = Fail("a suspended-thread collision changed the caller slot");
+
+            if (status != 0)
+                break;
+        }
+
+        if (status != 0)
+            break;
+        if (!hookResult)
+        {
+            status = Fail("Mhook_SetHook could not safely suspend all peer threads");
+            break;
+        }
+
+        BOOL unhookResult = FALSE;
+        for (int attempt = 0; attempt < kOperationRetryCount && !unhookResult; ++attempt)
+        {
+            unhookResult = Mhook_Unhook(&trampoline);
+            if (!unhookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+                status = Fail("Mhook_Unhook failed unexpectedly while other threads were running");
+            else if (!unhookResult && trampoline == target)
+                status = Fail("a suspended-thread collision published a failed unhook");
+
+            if (status != 0)
+                break;
+        }
+
+        if (status == 0 && !unhookResult)
+            status = Fail("Mhook_Unhook could not safely suspend all peer threads");
     }
 
     InterlockedExchange(&g_stopThreads, 1);
-    WaitForMultipleObjects(4, threads, TRUE, INFINITE);
-    for (int i = 0; i < 4; ++i)
+    WaitForMultipleObjects(kWorkerCount, threads, TRUE, INFINITE);
+    for (int i = 0; i < kWorkerCount; ++i)
         CloseHandle(threads[i]);
+
+    // Restore a hook left installed only because the stress case itself failed.
+    if (trampoline != target)
+        Mhook_Unhook(&trampoline);
 
     if (status != 0)
         return status;
     if (g_badResults != 0)
         return Fail("a thread observed a result from neither the target nor the hook");
+    return 0;
+}
+
+/**
+ * @brief Verifies that peer access failures cannot publish an install or removal.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseSuspensionFailure(void)
+{
+    const SIZE_T kWorkerCount = 2;
+    const SIZE_T kRestrictedWorkerIndex = 1;
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the suspension failure target failed");
+
+    BYTE targetSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(targetSnapshot, target, TARGET_BUFFER_SIZE);
+
+    ACL emptyAcl = {};
+    SECURITY_DESCRIPTOR restrictedSecurityDescriptor = {};
+    SECURITY_DESCRIPTOR permissiveSecurityDescriptor = {};
+    SECURITY_ATTRIBUTES restrictedAttributes = {};
+    const char* failure = NULL;
+
+    if (!InitializeAcl(&emptyAcl, sizeof(emptyAcl), ACL_REVISION))
+        failure = "InitializeAcl for the restricted worker failed";
+    else if (!InitializeSecurityDescriptor(&restrictedSecurityDescriptor, SECURITY_DESCRIPTOR_REVISION))
+        failure = "InitializeSecurityDescriptor for the restricted worker failed";
+    else if (!SetSecurityDescriptorDacl(&restrictedSecurityDescriptor, TRUE, &emptyAcl, FALSE))
+        failure = "SetSecurityDescriptorDacl for the restricted worker failed";
+    else if (!InitializeSecurityDescriptor(&permissiveSecurityDescriptor, SECURITY_DESCRIPTOR_REVISION))
+        failure = "InitializeSecurityDescriptor for the permissive worker failed";
+    else if (!SetSecurityDescriptorDacl(&permissiveSecurityDescriptor, TRUE, NULL, FALSE))
+        failure = "SetSecurityDescriptorDacl for the permissive worker failed";
+
+    restrictedAttributes.nLength = sizeof(restrictedAttributes);
+    restrictedAttributes.lpSecurityDescriptor = &restrictedSecurityDescriptor;
+
+    HANDLE threads[kWorkerCount] = {};
+    DWORD threadIds[kWorkerCount] = {};
+    LPSECURITY_ATTRIBUTES threadAttributes[kWorkerCount] = { NULL, &restrictedAttributes };
+    g_stopThreads = 0;
+
+    SIZE_T createdThreadCount = 0;
+    for (; !failure && createdThreadCount < kWorkerCount; ++createdThreadCount)
+    {
+        threads[createdThreadCount] = CreateThread(threadAttributes[createdThreadCount], 0, waitForStop, NULL, 0, &threadIds[createdThreadCount]);
+        if (!threads[createdThreadCount])
+            failure = "CreateThread for the suspension failure case failed";
+    }
+
+    if (!failure)
+    {
+        HANDLE probe = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, threadIds[kRestrictedWorkerIndex]);
+        if (probe)
+        {
+            CloseHandle(probe);
+            failure = "the restricted worker still allowed the access requested by Mhook";
+        }
+        else if (GetLastError() != ERROR_ACCESS_DENIED)
+        {
+            failure = "the restricted worker failed with an unexpected error";
+        }
+    }
+
+    PVOID trampoline = target;
+    BOOL hookResult = FALSE;
+    if (!failure)
+    {
+        hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+
+        if (hookResult)
+            failure = "Mhook_SetHook succeeded when a peer thread could not be opened";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            failure = "Mhook_SetHook reported the wrong suspension failure status";
+        else if (trampoline != target)
+            failure = "the failed Mhook_SetHook changed the caller slot";
+        else if (memcmp(target, targetSnapshot, TARGET_BUFFER_SIZE) != 0)
+            failure = "the failed Mhook_SetHook changed the target bytes";
+    }
+
+    if (!failure && !peerSuspensionsWereReleased(threads, createdThreadCount))
+        failure = "a peer thread remained suspended after hook rollback";
+
+    // Permit installation so the same real access failure can exercise removal.
+    if (!failure && !SetKernelObjectSecurity(threads[kRestrictedWorkerIndex], DACL_SECURITY_INFORMATION, &permissiveSecurityDescriptor))
+        failure = "making the restricted worker accessible failed";
+
+    if (!failure)
+    {
+        hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+        if (!hookResult)
+            failure = "Mhook_SetHook failed after restoring peer access";
+    }
+
+    BYTE installedSnapshot[TARGET_BUFFER_SIZE] = {};
+    if (!failure)
+        memcpy(installedSnapshot, target, TARGET_BUFFER_SIZE);
+
+    if (!failure && !SetKernelObjectSecurity(threads[kRestrictedWorkerIndex], DACL_SECURITY_INFORMATION, &restrictedSecurityDescriptor))
+        failure = "restricting the worker before unhooking failed";
+
+    if (!failure)
+    {
+        const BOOL unhookResult = Mhook_Unhook(&trampoline);
+        if (unhookResult)
+            failure = "Mhook_Unhook succeeded when a peer thread could not be opened";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            failure = "Mhook_Unhook reported the wrong suspension failure status";
+        else if (trampoline == target)
+            failure = "the failed Mhook_Unhook changed the caller slot";
+        else if (memcmp(target, installedSnapshot, TARGET_BUFFER_SIZE) != 0)
+            failure = "the failed Mhook_Unhook changed the target bytes";
+    }
+
+    if (!failure && !peerSuspensionsWereReleased(threads, createdThreadCount))
+        failure = "a peer thread remained suspended after unhook rollback";
+
+    InterlockedExchange(&g_stopThreads, 1);
+    if (createdThreadCount != 0)
+        WaitForMultipleObjects((DWORD)createdThreadCount, threads, TRUE, INFINITE);
+    for (SIZE_T index = 0; index < createdThreadCount; ++index)
+        CloseHandle(threads[index]);
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "cleaning up the installed hook failed";
+
+    if (failure)
+        return Fail(failure);
     return 0;
 }
 
@@ -869,6 +1089,7 @@ static const TestCase kCases[] = {
     { "snapshot_boundary", CaseSnapshotBoundary },
     { "short_func", CaseShortFunc },
     { "threads", CaseThreads },
+    { "suspend_failure", caseSuspensionFailure },
     { "reuse", CaseReuse },
 #ifdef _M_X64
     { "pool", caseTrampolinePoolBookkeeping },
