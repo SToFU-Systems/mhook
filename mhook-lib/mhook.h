@@ -62,7 +62,7 @@ typedef enum MHOOK_STATUS
     /** No monitored operation reported a failure. */
     MHOOK_STATUS_SUCCESS = 0,
 
-    /** A required address is NULL, or the resolved target and replacement are identical. */
+    /** A required address is NULL, resolved functions are identical, or a removal is repeated in one batch. */
     MHOOK_STATUS_INVALID_ARGUMENT = 1,
 
     /** The target prologue could not be decoded. */
@@ -86,7 +86,7 @@ typedef enum MHOOK_STATUS
     /** An instruction-cache flush for modified code failed. */
     MHOOK_STATUS_PATCH_FAILED = 8,
 
-    /** Another writer modified the target after the hook was installed. */
+    /** Live target bytes no longer match the image retained by Mhook. */
     MHOOK_STATUS_TARGET_MODIFIED = 9,
 
     /** The caller's function-pointer slot is misaligned, unreadable, or unwritable. */
@@ -101,9 +101,28 @@ typedef enum MHOOK_STATUS
     /** Following entry-point jumps exceeded the supported depth. */
     MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13,
 
-    /** A function-resolution chain reached a target with an active hook. */
+    /** A resolved request conflicts with an active hook or another batch entry. */
     MHOOK_STATUS_ALREADY_HOOKED = 14
 } MHOOK_STATUS;
+
+
+/**
+ * @brief Carries one hook request and its result through batch operations.
+ *
+ * Both batch APIs update the caller-owned function slot, so the same descriptor
+ * array can install and later remove its hooks without being rebuilt.
+ */
+typedef struct MHOOK_HOOK_INFO
+{
+    /** Caller-owned slot that receives the trampoline or restored target. */
+    PVOID* ppSystemFunction;
+
+    /** Replacement used for installation and ignored during removal. */
+    PVOID pHookFunction;
+
+    /** Result written for this request by the most recent batch operation. */
+    MHOOK_STATUS status;
+} MHOOK_HOOK_INFO;
 
 
 /**
@@ -143,6 +162,25 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
 
 
 /**
+ * @brief Atomically installs a batch of hook requests.
+ *
+ * Every request is resolved, decoded, checked for conflicts, and assigned a
+ * trampoline before any target is modified. The batch then installs every
+ * patch while peer threads are suspended. A later commit failure restores all
+ * earlier patches, leaving caller slots and the active-hook registry unchanged.
+ *
+ * A SUCCESS entry in a failed batch means that request was valid and did not
+ * cause the failure; it was not published. The failing entry carries the
+ * diagnostic status, which is also returned by Mhook_GetLastStatus().
+ *
+ * @param[in,out] hooks Requests to install and storage for their results.
+ * @param[in]     hookCount Number of descriptors in hooks.
+ * @return TRUE when every hook was installed; otherwise FALSE.
+ */
+BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
+
+
+/**
  * @brief Removes a hook and restores the bytes it overwrote.
  *
  * Restores only if the prologue still holds exactly the patch this hook
@@ -158,14 +196,34 @@ BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
  *        failure, so a refused call can be retried with the same pointer.
  * @return TRUE if the original bytes were restored. On success, the caller's
  *         GetLastError value is preserved.
- * @retval FALSE Invalid arguments and descriptors preserve GetLastError.
- *         Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
+ * @retval FALSE Invalid arguments, descriptors, and inaccessible targets
+ *         preserve GetLastError. Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
  *         MHOOK_ERROR_NOT_HOOKED, or the code from the failed VirtualProtect.
  *
  * @warning The trampoline is not freed, since a thread may still be running in
  *          it, but it must not be called once this returns TRUE.
  */
 BOOL Mhook_Unhook(PVOID *ppHookedFunction);
+
+
+/**
+ * @brief Atomically removes a batch of hook requests.
+ *
+ * Every caller slot and installed patch is validated before any target is
+ * modified. The batch then restores every target while peer threads are
+ * suspended. A later removal failure reinstalls all earlier patches, leaving
+ * caller slots and the active-hook registry unchanged.
+ *
+ * A SUCCESS entry in a failed batch means that request was valid and did not
+ * cause the failure; it was not removed. The failing entry carries the
+ * diagnostic status, which is also returned by Mhook_GetLastStatus().
+ *
+ * @param[in,out] hooks Requests to remove and storage for their results.
+ *        pHookFunction is ignored.
+ * @param[in]     hookCount Number of descriptors in hooks.
+ * @return TRUE when every hook was removed; otherwise FALSE.
+ */
+BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
 
 
 /**
@@ -188,9 +246,10 @@ PVOID Mhook_GetTarget(PVOID pHookedFunction);
  *        installation or removal.
  *
  * Each thread owns an independent status initialized to MHOOK_STATUS_SUCCESS.
- * Reading the value does not clear it. The next Mhook_SetHook() or
- * Mhook_Unhook() call on the same thread replaces it, so callers that need a
- * diagnostic should retrieve it immediately after the operation.
+ * Reading the value does not clear it. The next set or unhook operation on the
+ * same thread replaces it, so callers that need a diagnostic should retrieve
+ * it immediately after the operation. For a batch operation, this reports the
+ * overall result; each descriptor reports its own result through status.
  *
  * @return One of the MHOOK_STATUS values describing the latest operation on
  *         the calling thread.

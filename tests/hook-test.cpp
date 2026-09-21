@@ -48,9 +48,9 @@ static volatile LONG g_hookCalls = 0;
 // has no other way to reach the trampoline it calls through.
 static PVOID g_trampoline = NULL;
 
-static PBYTE AllocCodeBuffer(const BYTE* code, size_t length)
+static PBYTE AllocCodeBuffer(const BYTE* code, size_t length, PVOID address = NULL)
 {
-    PBYTE buffer = (PBYTE)VirtualAlloc(NULL, TARGET_BUFFER_SIZE,
+    PBYTE buffer = (PBYTE)VirtualAlloc(address, TARGET_BUFFER_SIZE,
                                        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (buffer) {
         memset(buffer, 0xCC, TARGET_BUFFER_SIZE);
@@ -58,6 +58,69 @@ static PBYTE AllocCodeBuffer(const BYTE* code, size_t length)
         FlushInstructionCache(GetCurrentProcess(), buffer, TARGET_BUFFER_SIZE);
     }
     return buffer;
+}
+
+
+/**
+ * @brief Creates executable code in a writable mapped view that can be remapped at the same address.
+ * @param[in] code Bytes copied into the mapped target.
+ * @param[in] length Number of bytes copied from code.
+ * @param[out] mapping Mapping handle that owns the returned view.
+ * @return Executable writable view, or NULL when setup fails.
+ */
+static PBYTE allocateMappedCodeBuffer(const BYTE* code, size_t length, OUT HANDLE* mapping)
+{
+    *mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_EXECUTE_READWRITE, 0, TARGET_BUFFER_SIZE, NULL);
+    if (!*mapping)
+        return NULL;
+
+    PBYTE buffer = static_cast<PBYTE>(MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, 0, 0, TARGET_BUFFER_SIZE));
+    if (!buffer)
+    {
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    memset(buffer, 0xCC, TARGET_BUFFER_SIZE);
+    memcpy(buffer, code, length);
+    if (!FlushInstructionCache(GetCurrentProcess(), buffer, TARGET_BUFFER_SIZE))
+    {
+        UnmapViewOfFile(buffer);
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    return buffer;
+}
+
+
+/**
+ * @brief Creates executable code whose mapped view cannot be made writable.
+ * @param[in] code Bytes copied into the mapped target.
+ * @param[in] length Number of bytes copied from code.
+ * @param[out] mapping Mapping handle that owns the returned view.
+ * @return Executable read-only view, or NULL when setup fails.
+ */
+static PBYTE allocateReadOnlyCodeBuffer(const BYTE* code, size_t length, OUT HANDLE* mapping)
+{
+    PBYTE writableView = allocateMappedCodeBuffer(code, length, mapping);
+    if (!writableView)
+        return NULL;
+
+    // Exclude write access from the target view so hook commit cannot change its protection.
+    PBYTE executableView = static_cast<PBYTE>(MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_EXECUTE, 0, 0, TARGET_BUFFER_SIZE));
+    UnmapViewOfFile(writableView);
+
+    if (!executableView)
+    {
+        CloseHandle(*mapping);
+        *mapping = NULL;
+        return NULL;
+    }
+
+    return executableView;
 }
 
 static bool IsJumpPatched(const BYTE* code)
@@ -148,6 +211,74 @@ static int CaseRestore(void)
         return Fail("the unhooked target did not produce the original result");
     if (g_hookCalls != 0)
         return Fail("the hook ran after unhooking");
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that the batch API installs and removes multiple hooks through shared descriptors.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatch(void)
+{
+    const DWORD kInstallLastError = ERROR_ACCESS_DENIED;
+    const DWORD kUnhookLastError = ERROR_BUSY;
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    PBYTE secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+
+    if (!firstTarget || !secondTarget)
+        return Fail("VirtualAlloc for a batch target failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    SetLastError(kInstallLastError);
+    const BOOL installResult = Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks));
+    const DWORD installLastError = GetLastError();
+
+    if (!installResult)
+        return Fail("Mhook_SetHookBatch failed for valid hooks");
+    if (installLastError != kInstallLastError)
+        return Fail("Mhook_SetHookBatch did not preserve the caller's last error");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_SetHookBatch did not report overall success");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_SetHookBatch did not report per-hook success");
+    if (firstTrampoline == firstTarget || secondTrampoline == secondTarget)
+        return Fail("Mhook_SetHookBatch did not publish every trampoline");
+    if (((TargetFn)firstTarget)() != HOOK_RESULT || ((TargetFn)secondTarget)() != HOOK_RESULT)
+        return Fail("a batch target did not reach the hook");
+
+    SetLastError(kUnhookLastError);
+    const BOOL unhookResult = Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks));
+    const DWORD unhookLastError = GetLastError();
+
+    if (!unhookResult)
+        return Fail("Mhook_UnhookBatch failed for valid hooks");
+    if (unhookLastError != kUnhookLastError)
+        return Fail("Mhook_UnhookBatch did not preserve the caller's last error");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_UnhookBatch did not report overall success");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_UnhookBatch did not report per-hook success");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("Mhook_UnhookBatch did not restore every target pointer");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 ||
+        memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("Mhook_UnhookBatch did not restore every target prologue");
+
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
     return 0;
 }
 
@@ -495,8 +626,471 @@ static DWORD WINAPI SpinCallingTarget(LPVOID parameter)
     return 0;
 }
 
+
+/**
+ * @brief Verifies that a preparation failure leaves every batch hook unpublished.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchPrepareFailure(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the batch preparation target failed");
+
+    BYTE snapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(snapshot, target, sizeof(snapshot));
+
+    // Place a valid request before an invalid one to detect eager installation.
+    PVOID firstTrampoline = target;
+    PVOID invalidTarget = NULL;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &invalidTarget, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_SUCCESS }
+    };
+
+    if (Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch accepted an invalid request");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a preparation failure did not identify the invalid request");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a preparation failure reported the wrong overall status");
+    if (firstTrampoline != target)
+        return Fail("a preparation failure published an earlier trampoline");
+    if (memcmp(target, snapshot, sizeof(snapshot)) != 0)
+        return Fail("a preparation failure patched an earlier target");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that conflicting prepared requests abort the whole batch.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchConflict(void)
+{
+    PBYTE duplicateTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!duplicateTarget)
+        return Fail("VirtualAlloc for the duplicate batch target failed");
+
+    BYTE duplicateSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(duplicateSnapshot, duplicateTarget, sizeof(duplicateSnapshot));
+
+    // A replacement inside its own overwritten prologue would be destroyed by installation.
+    PVOID selfConflictTrampoline = duplicateTarget;
+    MHOOK_HOOK_INFO selfConflictHook =
+    {
+        &selfConflictTrampoline,
+        duplicateTarget + 1,
+        MHOOK_STATUS_INVALID_ARGUMENT
+    };
+
+    if (Mhook_SetHookBatch(&selfConflictHook, 1))
+        return Fail("Mhook_SetHookBatch accepted a replacement inside its own target");
+    if (selfConflictHook.status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a self-range conflict reported the wrong status");
+    if (selfConflictTrampoline != duplicateTarget)
+        return Fail("a self-range conflict published a trampoline");
+    if (memcmp(duplicateTarget, duplicateSnapshot, sizeof(duplicateSnapshot)) != 0)
+        return Fail("a self-range conflict changed the target bytes");
+
+    // Two caller slots that resolve to the same target cannot be installed atomically.
+    PVOID firstDuplicateTrampoline = duplicateTarget;
+    PVOID secondDuplicateTrampoline = duplicateTarget;
+    MHOOK_HOOK_INFO duplicateHooks[] =
+    {
+        { &firstDuplicateTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondDuplicateTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(duplicateHooks, ARRAYSIZE(duplicateHooks)))
+        return Fail("Mhook_SetHookBatch accepted duplicate resolved targets");
+    if (duplicateHooks[0].status != MHOOK_STATUS_SUCCESS || duplicateHooks[1].status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a duplicate batch target did not identify the conflicting request");
+    if (firstDuplicateTrampoline != duplicateTarget || secondDuplicateTrampoline != duplicateTarget)
+        return Fail("a duplicate batch target published a trampoline");
+    if (memcmp(duplicateTarget, duplicateSnapshot, sizeof(duplicateSnapshot)) != 0)
+        return Fail("a duplicate batch target changed the target bytes");
+
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    PBYTE secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!firstTarget || !secondTarget)
+        return Fail("VirtualAlloc for replacement-conflict targets failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    // A replacement cannot point into code that another request will overwrite.
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO replacementHooks[] =
+    {
+        { &firstTrampoline, secondTarget, MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(replacementHooks, ARRAYSIZE(replacementHooks)))
+        return Fail("Mhook_SetHookBatch accepted a replacement inside another target");
+    if (replacementHooks[0].status != MHOOK_STATUS_SUCCESS || replacementHooks[1].status != MHOOK_STATUS_ALREADY_HOOKED)
+        return Fail("a replacement conflict did not identify the conflicting request");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("a replacement conflict published a trampoline");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 || memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("a replacement conflict changed target bytes");
+
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(duplicateTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that a commit failure restores every earlier hook in the batch.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchCommitFailure(void)
+{
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    HANDLE secondMapping = NULL;
+    PBYTE secondTarget = allocateReadOnlyCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), &secondMapping);
+
+    if (!firstTarget || !secondTarget)
+        return Fail("mapped target setup for the batch commit test failed");
+
+    BYTE firstSnapshot[TARGET_BUFFER_SIZE] = {};
+    BYTE secondSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstSnapshot, firstTarget, sizeof(firstSnapshot));
+    memcpy(secondSnapshot, secondTarget, sizeof(secondSnapshot));
+
+    // Force the second commit to fail after the first request is ready to install.
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch installed a read-only mapped target");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("a commit failure did not identify the unwritable request");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("a commit failure reported the wrong overall status");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("a commit failure published a batch trampoline");
+    if (memcmp(firstTarget, firstSnapshot, sizeof(firstSnapshot)) != 0 || memcmp(secondTarget, secondSnapshot, sizeof(secondSnapshot)) != 0)
+        return Fail("a commit failure left a batch target patched");
+
+    UnmapViewOfFile(secondTarget);
+    CloseHandle(secondMapping);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that an invalid live patch prevents every batch removal.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchUnhookPrepareFailure(void)
+{
+    const DWORD kCallerLastError = ERROR_BUSY;
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    PBYTE secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!firstTarget || !secondTarget)
+        return Fail("VirtualAlloc for batch unhook preparation targets failed");
+
+    BYTE firstOriginal[TARGET_BUFFER_SIZE] = {};
+    BYTE secondOriginal[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstOriginal, firstTarget, sizeof(firstOriginal));
+    memcpy(secondOriginal, secondTarget, sizeof(secondOriginal));
+
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (!Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch failed before the batch unhook preparation test");
+
+    const PVOID firstInstalledTrampoline = firstTrampoline;
+    const PVOID secondInstalledTrampoline = secondTrampoline;
+    BYTE firstInstalled[TARGET_BUFFER_SIZE] = {};
+    BYTE secondModified[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstInstalled, firstTarget, sizeof(firstInstalled));
+
+    // Simulate another writer changing the second installed patch before preflight.
+    secondTarget[1] ^= 0xFF;
+    if (!FlushInstructionCache(GetCurrentProcess(), secondTarget, TARGET_BUFFER_SIZE))
+        return Fail("flushing the modified batch unhook target failed");
+    memcpy(secondModified, secondTarget, sizeof(secondModified));
+
+    SetLastError(kCallerLastError);
+    if (Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_UnhookBatch accepted a modified target");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_TARGET_MODIFIED)
+        return Fail("batch unhook preparation did not identify the modified target");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_TARGET_MODIFIED)
+        return Fail("batch unhook preparation reported the wrong overall status");
+    if (GetLastError() != MHOOK_ERROR_TARGET_MODIFIED)
+        return Fail("batch unhook preparation reported the wrong Win32 error");
+    if (firstTrampoline != firstInstalledTrampoline || secondTrampoline != secondInstalledTrampoline)
+        return Fail("batch unhook preparation failure changed a caller slot");
+    if (memcmp(firstTarget, firstInstalled, sizeof(firstInstalled)) != 0 || memcmp(secondTarget, secondModified, sizeof(secondModified)) != 0)
+        return Fail("batch unhook preparation failure changed target bytes");
+    if (Mhook_GetTarget(firstTrampoline) != firstTarget || Mhook_GetTarget(secondTrampoline) != secondTarget)
+        return Fail("batch unhook preparation failure retired an active hook");
+
+    // Repair the contested patch and prove the unchanged descriptors can be retried.
+    secondTarget[1] ^= 0xFF;
+    if (!FlushInstructionCache(GetCurrentProcess(), secondTarget, TARGET_BUFFER_SIZE))
+        return Fail("flushing the repaired batch unhook target failed");
+    if (!Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_UnhookBatch could not retry after the target was repaired");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("the retried batch unhook did not restore caller slots");
+    if (memcmp(firstTarget, firstOriginal, sizeof(firstOriginal)) != 0 || memcmp(secondTarget, secondOriginal, sizeof(secondOriginal)) != 0)
+        return Fail("the retried batch unhook did not restore target bytes");
+
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that one trampoline cannot be removed twice by the same batch.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchUnhookConflict(void)
+{
+    const DWORD kCallerLastError = ERROR_BUSY;
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the duplicate batch unhook target failed");
+
+    BYTE original[TARGET_BUFFER_SIZE] = {};
+    memcpy(original, target, sizeof(original));
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed before the duplicate batch unhook test");
+
+    const PVOID installedTrampoline = trampoline;
+    PVOID duplicateTrampoline = trampoline;
+    BYTE installed[TARGET_BUFFER_SIZE] = {};
+    memcpy(installed, target, sizeof(installed));
+
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &trampoline, NULL, MHOOK_STATUS_INVALID_ARGUMENT },
+        { &duplicateTrampoline, NULL, MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    SetLastError(kCallerLastError);
+    if (Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_UnhookBatch accepted the same trampoline twice");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a duplicate batch unhook did not identify the repeated request");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("a duplicate batch unhook reported the wrong overall status");
+    if (GetLastError() != kCallerLastError)
+        return Fail("a duplicate batch unhook changed the caller's last error");
+    if (trampoline != installedTrampoline || duplicateTrampoline != installedTrampoline)
+        return Fail("a duplicate batch unhook changed a caller slot");
+    if (memcmp(target, installed, sizeof(installed)) != 0)
+        return Fail("a duplicate batch unhook changed the target bytes");
+    if (Mhook_GetTarget(trampoline) != target)
+        return Fail("a duplicate batch unhook retired the active hook");
+
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("cleaning up the duplicate batch unhook target failed");
+    if (memcmp(target, original, sizeof(original)) != 0)
+        return Fail("cleanup did not restore the duplicate batch unhook target");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Verifies that a removal failure reinstalls every earlier batch hook.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBatchUnhookCommitFailure(void)
+{
+    const DWORD kCallerLastError = ERROR_BUSY;
+
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    HANDLE secondMapping = NULL;
+    PBYTE secondTarget = allocateMappedCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), &secondMapping);
+    if (!firstTarget || !secondTarget)
+        return Fail("mapped target setup for the batch unhook commit test failed");
+
+    BYTE firstOriginal[TARGET_BUFFER_SIZE] = {};
+    BYTE secondOriginal[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstOriginal, firstTarget, sizeof(firstOriginal));
+    memcpy(secondOriginal, secondTarget, sizeof(secondOriginal));
+
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    MHOOK_HOOK_INFO hooks[] =
+    {
+        { &firstTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT },
+        { &secondTrampoline, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_INVALID_ARGUMENT }
+    };
+
+    if (!Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_SetHookBatch failed before the batch unhook commit test");
+
+    const PVOID firstInstalledTrampoline = firstTrampoline;
+    const PVOID secondInstalledTrampoline = secondTrampoline;
+    BYTE firstInstalled[TARGET_BUFFER_SIZE] = {};
+    BYTE secondInstalled[TARGET_BUFFER_SIZE] = {};
+    memcpy(firstInstalled, firstTarget, sizeof(firstInstalled));
+    memcpy(secondInstalled, secondTarget, sizeof(secondInstalled));
+
+    // Remap the installed patch without write access so commit fails after preflight.
+    PBYTE secondAddress = secondTarget;
+    if (!UnmapViewOfFile(secondTarget))
+        return Fail("unmapping the writable batch unhook target failed");
+    secondTarget = static_cast<PBYTE>(MapViewOfFileEx(secondMapping, FILE_MAP_READ | FILE_MAP_EXECUTE, 0, 0, TARGET_BUFFER_SIZE, secondAddress));
+    if (secondTarget != secondAddress)
+        return Fail("remapping the batch unhook target read-only failed");
+
+    DWORD ignoredProtection = 0;
+    SetLastError(kCallerLastError);
+    if (VirtualProtect(secondTarget, TARGET_BUFFER_SIZE, PAGE_EXECUTE_READWRITE, &ignoredProtection))
+        return Fail("the read-only batch unhook target unexpectedly accepted writable protection");
+    const DWORD expectedLastError = GetLastError();
+
+    SetLastError(kCallerLastError);
+    if (Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_UnhookBatch removed a read-only mapped target");
+    const DWORD actualLastError = GetLastError();
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("batch unhook commit failure did not identify the unwritable target");
+    if (Mhook_GetLastStatus() != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        return Fail("batch unhook commit failure reported the wrong overall status");
+    if (actualLastError != expectedLastError)
+        return Fail("batch unhook commit failure reported the wrong Win32 error");
+    if (firstTrampoline != firstInstalledTrampoline || secondTrampoline != secondInstalledTrampoline)
+        return Fail("batch unhook commit failure changed a caller slot");
+    if (memcmp(firstTarget, firstInstalled, sizeof(firstInstalled)) != 0 || memcmp(secondTarget, secondInstalled, sizeof(secondInstalled)) != 0)
+        return Fail("batch unhook commit failure did not preserve installed patches");
+    if (Mhook_GetTarget(firstTrampoline) != firstTarget || Mhook_GetTarget(secondTrampoline) != secondTarget)
+        return Fail("batch unhook commit failure retired an active hook");
+
+    // Restore writable target storage and verify the original batch can be retried.
+    UnmapViewOfFile(secondTarget);
+    secondTarget = static_cast<PBYTE>(MapViewOfFileEx(secondMapping, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, 0, 0, TARGET_BUFFER_SIZE, secondAddress));
+    if (secondTarget != secondAddress)
+        return Fail("restoring writable storage for the batch unhook retry failed");
+    if (!Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("Mhook_UnhookBatch could not retry after commit failure");
+    if (firstTrampoline != firstTarget || secondTrampoline != secondTarget)
+        return Fail("the retried batch unhook did not restore caller slots");
+    if (memcmp(firstTarget, firstOriginal, sizeof(firstOriginal)) != 0 || memcmp(secondTarget, secondOriginal, sizeof(secondOriginal)) != 0)
+        return Fail("the retried batch unhook did not restore target bytes");
+
+    UnmapViewOfFile(secondTarget);
+    CloseHandle(secondMapping);
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+
+/**
+ * @brief Keeps a peer alive without entering the target code used by suspension tests.
+ * @return Zero after the test requests worker shutdown.
+ */
+static DWORD WINAPI waitForStop(LPVOID)
+{
+    while (!g_stopThreads)
+        Sleep(1);
+    return 0;
+}
+
+
+/**
+ * @brief Checks and clears suspension counts left by a failed hook transaction.
+ * @param[in] threads Worker handles created by the test.
+ * @param[in] threadCount Number of handles in threads.
+ * @return TRUE when every worker was running before the check.
+ */
+static BOOL peerSuspensionsWereReleased(const HANDLE* threads, SIZE_T threadCount)
+{
+    BOOL allThreadsWereRunning = TRUE;
+
+    for (SIZE_T index = 0; index < threadCount; ++index)
+    {
+        const DWORD previousSuspendCount = SuspendThread(threads[index]);
+        if (previousSuspendCount == (DWORD)-1)
+        {
+            allThreadsWereRunning = FALSE;
+            continue;
+        }
+
+        for (DWORD resumeIndex = 0; resumeIndex <= previousSuspendCount; ++resumeIndex)
+        {
+            if (ResumeThread(threads[index]) == (DWORD)-1)
+                allThreadsWereRunning = FALSE;
+        }
+
+        if (previousSuspendCount != 0)
+            allThreadsWereRunning = FALSE;
+    }
+
+    return allThreadsWereRunning;
+}
+
+
+/**
+ * @brief Disables the privilege that bypasses thread DACL checks on elevated runners.
+ * @return TRUE when the privilege is disabled or absent from the process token.
+ */
+static BOOL disableDebugPrivilege(void)
+{
+    HANDLE processToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &processToken))
+        return FALSE;
+
+    BOOL result = FALSE;
+    LUID debugPrivilege = {};
+    if (LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &debugPrivilege))
+    {
+        TOKEN_PRIVILEGES privileges = {};
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Luid = debugPrivilege;
+
+        SetLastError(ERROR_SUCCESS);
+        result = AdjustTokenPrivileges(processToken, FALSE, &privileges, 0, NULL, NULL);
+        const DWORD privilegeError = GetLastError();
+        if (result)
+            result = privilegeError == ERROR_SUCCESS || privilegeError == ERROR_NOT_ALL_ASSIGNED;
+    }
+
+    if (!CloseHandle(processToken))
+        result = FALSE;
+
+    return result;
+}
+
 static int CaseThreads(void)
 {
+    const int kWorkerCount = 4;
+    const int kRoundCount = 25;
+    const int kOperationRetryCount = 16;
+
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
     if (!target)
         return Fail("VirtualAlloc for the target buffer failed");
@@ -504,14 +1098,17 @@ static int CaseThreads(void)
     g_stopThreads = 0;
     g_badResults = 0;
 
-    HANDLE threads[4];
-    for (int i = 0; i < 4; ++i) {
+    HANDLE threads[kWorkerCount] = {};
+    for (int i = 0; i < kWorkerCount; ++i)
+    {
         threads[i] = CreateThread(NULL, 0, SpinCallingTarget, target, 0, NULL);
-        if (!threads[i]) {
+        if (!threads[i])
+        {
             // Stop and join whatever already started before bailing out, so the
             // case never returns while threads are still running on the buffer.
             InterlockedExchange(&g_stopThreads, 1);
-            if (i > 0) {
+            if (i > 0)
+            {
                 WaitForMultipleObjects(i, threads, TRUE, INFINITE);
                 for (int j = 0; j < i; ++j)
                     CloseHandle(threads[j]);
@@ -521,25 +1118,197 @@ static int CaseThreads(void)
     }
 
     int status = 0;
-    // Each iteration hooks and unhooks while four threads hammer the target.
-    const int rounds = Exhaustive() ? 100 : 25;
-    for (int i = 0; i < rounds && status == 0; ++i) {
-        PVOID trampoline = target;
-        if (!Mhook_SetHook(&trampoline, (PVOID)&HookCounting))
-            status = Fail("Mhook_SetHook failed while other threads were running");
-        else if (!Mhook_Unhook(&trampoline))
-            status = Fail("Mhook_Unhook failed while other threads were running");
+    PVOID trampoline = target;
+    const int rounds = Exhaustive() ? 100 : kRoundCount;
+
+    // Complete every round while workers repeatedly enter the patch range.
+    for (int round = 0; round < rounds && status == 0; ++round)
+    {
+        BOOL hookResult = FALSE;
+        for (int attempt = 0; attempt < kOperationRetryCount && !hookResult; ++attempt)
+        {
+            hookResult = Mhook_SetHook(&trampoline, (PVOID)&HookCounting);
+            if (!hookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+                status = Fail("Mhook_SetHook failed unexpectedly while other threads were running");
+            else if (!hookResult && trampoline != target)
+                status = Fail("a suspended-thread collision changed the caller slot");
+
+            if (status != 0)
+                break;
+        }
+
+        if (status != 0)
+            break;
+        if (!hookResult)
+        {
+            status = Fail("Mhook_SetHook could not safely suspend all peer threads");
+            break;
+        }
+
+        BOOL unhookResult = FALSE;
+        for (int attempt = 0; attempt < kOperationRetryCount && !unhookResult; ++attempt)
+        {
+            unhookResult = Mhook_Unhook(&trampoline);
+            if (!unhookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+                status = Fail("Mhook_Unhook failed unexpectedly while other threads were running");
+            else if (!unhookResult && trampoline == target)
+                status = Fail("a suspended-thread collision published a failed unhook");
+
+            if (status != 0)
+                break;
+        }
+
+        if (status == 0 && !unhookResult)
+            status = Fail("Mhook_Unhook could not safely suspend all peer threads");
     }
 
     InterlockedExchange(&g_stopThreads, 1);
-    WaitForMultipleObjects(4, threads, TRUE, INFINITE);
-    for (int i = 0; i < 4; ++i)
+    WaitForMultipleObjects(kWorkerCount, threads, TRUE, INFINITE);
+    for (int i = 0; i < kWorkerCount; ++i)
         CloseHandle(threads[i]);
+
+    // Restore a hook left installed only because the stress case itself failed.
+    if (trampoline != target)
+        Mhook_Unhook(&trampoline);
 
     if (status != 0)
         return status;
     if (g_badResults != 0)
         return Fail("a thread observed a result from neither the target nor the hook");
+    return 0;
+}
+
+/**
+ * @brief Verifies that peer access failures cannot publish an install or removal.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseSuspensionFailure(void)
+{
+    const SIZE_T kWorkerCount = 2;
+    const SIZE_T kRestrictedWorkerIndex = 1;
+
+    // Make the worker DACL effective even when CI enables SeDebugPrivilege.
+    if (!disableDebugPrivilege())
+        return Fail("disabling SeDebugPrivilege for the suspension failure case failed");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the suspension failure target failed");
+
+    BYTE targetSnapshot[TARGET_BUFFER_SIZE] = {};
+    memcpy(targetSnapshot, target, TARGET_BUFFER_SIZE);
+
+    ACL emptyAcl = {};
+    SECURITY_DESCRIPTOR restrictedSecurityDescriptor = {};
+    SECURITY_DESCRIPTOR permissiveSecurityDescriptor = {};
+    SECURITY_ATTRIBUTES restrictedAttributes = {};
+    const char* failure = NULL;
+
+    if (!InitializeAcl(&emptyAcl, sizeof(emptyAcl), ACL_REVISION))
+        failure = "InitializeAcl for the restricted worker failed";
+    else if (!InitializeSecurityDescriptor(&restrictedSecurityDescriptor, SECURITY_DESCRIPTOR_REVISION))
+        failure = "InitializeSecurityDescriptor for the restricted worker failed";
+    else if (!SetSecurityDescriptorDacl(&restrictedSecurityDescriptor, TRUE, &emptyAcl, FALSE))
+        failure = "SetSecurityDescriptorDacl for the restricted worker failed";
+    else if (!InitializeSecurityDescriptor(&permissiveSecurityDescriptor, SECURITY_DESCRIPTOR_REVISION))
+        failure = "InitializeSecurityDescriptor for the permissive worker failed";
+    else if (!SetSecurityDescriptorDacl(&permissiveSecurityDescriptor, TRUE, NULL, FALSE))
+        failure = "SetSecurityDescriptorDacl for the permissive worker failed";
+
+    restrictedAttributes.nLength = sizeof(restrictedAttributes);
+    restrictedAttributes.lpSecurityDescriptor = &restrictedSecurityDescriptor;
+
+    HANDLE threads[kWorkerCount] = {};
+    DWORD threadIds[kWorkerCount] = {};
+    LPSECURITY_ATTRIBUTES threadAttributes[kWorkerCount] = { NULL, &restrictedAttributes };
+    g_stopThreads = 0;
+
+    SIZE_T createdThreadCount = 0;
+    for (; !failure && createdThreadCount < kWorkerCount; ++createdThreadCount)
+    {
+        threads[createdThreadCount] = CreateThread(threadAttributes[createdThreadCount], 0, waitForStop, NULL, 0, &threadIds[createdThreadCount]);
+        if (!threads[createdThreadCount])
+            failure = "CreateThread for the suspension failure case failed";
+    }
+
+    if (!failure)
+    {
+        HANDLE probe = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, threadIds[kRestrictedWorkerIndex]);
+        if (probe)
+        {
+            CloseHandle(probe);
+            failure = "the restricted worker still allowed the access requested by Mhook";
+        }
+        else if (GetLastError() != ERROR_ACCESS_DENIED)
+        {
+            failure = "the restricted worker failed with an unexpected error";
+        }
+    }
+
+    PVOID trampoline = target;
+    BOOL hookResult = FALSE;
+    if (!failure)
+    {
+        hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+
+        if (hookResult)
+            failure = "Mhook_SetHook succeeded when a peer thread could not be opened";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            failure = "Mhook_SetHook reported the wrong suspension failure status";
+        else if (trampoline != target)
+            failure = "the failed Mhook_SetHook changed the caller slot";
+        else if (memcmp(target, targetSnapshot, TARGET_BUFFER_SIZE) != 0)
+            failure = "the failed Mhook_SetHook changed the target bytes";
+    }
+
+    if (!failure && !peerSuspensionsWereReleased(threads, createdThreadCount))
+        failure = "a peer thread remained suspended after hook rollback";
+
+    // Permit installation so the same real access failure can exercise removal.
+    if (!failure && !SetKernelObjectSecurity(threads[kRestrictedWorkerIndex], DACL_SECURITY_INFORMATION, &permissiveSecurityDescriptor))
+        failure = "making the restricted worker accessible failed";
+
+    if (!failure)
+    {
+        hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+        if (!hookResult)
+            failure = "Mhook_SetHook failed after restoring peer access";
+    }
+
+    BYTE installedSnapshot[TARGET_BUFFER_SIZE] = {};
+    if (!failure)
+        memcpy(installedSnapshot, target, TARGET_BUFFER_SIZE);
+
+    if (!failure && !SetKernelObjectSecurity(threads[kRestrictedWorkerIndex], DACL_SECURITY_INFORMATION, &restrictedSecurityDescriptor))
+        failure = "restricting the worker before unhooking failed";
+
+    if (!failure)
+    {
+        const BOOL unhookResult = Mhook_Unhook(&trampoline);
+        if (unhookResult)
+            failure = "Mhook_Unhook succeeded when a peer thread could not be opened";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            failure = "Mhook_Unhook reported the wrong suspension failure status";
+        else if (trampoline == target)
+            failure = "the failed Mhook_Unhook changed the caller slot";
+        else if (memcmp(target, installedSnapshot, TARGET_BUFFER_SIZE) != 0)
+            failure = "the failed Mhook_Unhook changed the target bytes";
+    }
+
+    if (!failure && !peerSuspensionsWereReleased(threads, createdThreadCount))
+        failure = "a peer thread remained suspended after unhook rollback";
+
+    InterlockedExchange(&g_stopThreads, 1);
+    if (createdThreadCount != 0)
+        WaitForMultipleObjects((DWORD)createdThreadCount, threads, TRUE, INFINITE);
+    for (SIZE_T index = 0; index < createdThreadCount; ++index)
+        CloseHandle(threads[index]);
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "cleaning up the installed hook failed";
+
+    if (failure)
+        return Fail(failure);
     return 0;
 }
 
@@ -564,6 +1333,95 @@ static int CaseReuse(void)
         return Fail("the target bytes drifted over repeated hook and unhook cycles");
     return 0;
 }
+
+
+#ifdef _M_X64
+/**
+ * @brief Verifies distant routing and prevents active trampolines from reentering the free list.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseTrampolinePoolBookkeeping(void)
+{
+    static const uintptr_t kNearbyTargetOffset = UINT64_C(0x0000000000020000);
+    static const uintptr_t kTargetAddressPairs[][2] =
+    {
+        { UINT64_C(0x0000000200000000), UINT64_C(0x0000000600000000) },
+        { UINT64_C(0x0000000A00000000), UINT64_C(0x0000000E00000000) },
+        { UINT64_C(0x0000001200000000), UINT64_C(0x0000001600000000) }
+    };
+
+    PBYTE firstTarget = NULL;
+    PBYTE nearbyTarget = NULL;
+    PBYTE secondTarget = NULL;
+
+    for (size_t index = 0; index < ARRAYSIZE(kTargetAddressPairs); ++index)
+    {
+        firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][0]));
+
+        if (!firstTarget)
+            continue;
+
+        nearbyTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][0] + kNearbyTargetOffset));
+        secondTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddressPairs[index][1]));
+
+        if (nearbyTarget && secondTarget)
+            break;
+
+        VirtualFree(firstTarget, 0, MEM_RELEASE);
+        if (nearbyTarget)
+            VirtualFree(nearbyTarget, 0, MEM_RELEASE);
+        if (secondTarget)
+            VirtualFree(secondTarget, 0, MEM_RELEASE);
+
+        firstTarget = NULL;
+        nearbyTarget = NULL;
+        secondTarget = NULL;
+    }
+
+    if (!firstTarget || !nearbyTarget || !secondTarget)
+        return Fail("VirtualAlloc could not reserve distant trampoline-pool targets");
+
+    PBYTE initialTargets[] = { firstTarget, secondTarget };
+
+    for (size_t index = 0; index < ARRAYSIZE(initialTargets); ++index)
+    {
+        PVOID trampoline = initialTargets[index];
+
+        if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+            return Fail("Mhook_SetHook failed while exercising distant trampoline pools");
+
+        // Execute the distant route through its nearby stub before removing the hook.
+        g_hookCalls = 0;
+        if (reinterpret_cast<TargetFn>(initialTargets[index])() != HOOK_RESULT)
+            return Fail("calling a distant target did not reach the hook");
+        if (g_hookCalls != 1)
+            return Fail("the distant target called the hook an unexpected number of times");
+
+        if (!Mhook_Unhook(&trampoline))
+            return Fail("Mhook_Unhook failed while exercising distant trampoline pools");
+    }
+
+    PVOID firstTrampoline = firstTarget;
+    if (!Mhook_SetHook(&firstTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed while reserving the first nearby trampoline");
+
+    PVOID nearbyTrampoline = nearbyTarget;
+    if (!Mhook_SetHook(&nearbyTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed while reserving the second nearby trampoline");
+
+    if (firstTrampoline == nearbyTrampoline)
+        return Fail("the same trampoline was reserved for two active hooks");
+
+    if (!Mhook_Unhook(&nearbyTrampoline) || !Mhook_Unhook(&firstTrampoline))
+        return Fail("Mhook_Unhook failed while cleaning up the trampoline pool test");
+
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    VirtualFree(nearbyTarget, 0, MEM_RELEASE);
+    VirtualFree(secondTarget, 0, MEM_RELEASE);
+
+    return 0;
+}
+#endif // _M_X64
 
 // Mirrors the patterns the entry-point resolver follows, without following them.
 static bool PrologueJumpsElsewhere(const BYTE* code)
@@ -703,6 +1561,13 @@ struct TestCase {
 
 static const TestCase kCases[] = {
     { "basic", CaseBasic },
+    { "batch", caseBatch },
+    { "batch_prepare_failure", caseBatchPrepareFailure },
+    { "batch_conflict", caseBatchConflict },
+    { "batch_commit_failure", caseBatchCommitFailure },
+    { "batch_unhook_prepare_failure", caseBatchUnhookPrepareFailure },
+    { "batch_unhook_conflict", caseBatchUnhookConflict },
+    { "batch_unhook_commit_failure", caseBatchUnhookCommitFailure },
     { "trampoline", CaseTrampoline },
     { "restore", CaseRestore },
     { "conflict", CaseConflict },
@@ -711,7 +1576,11 @@ static const TestCase kCases[] = {
     { "snapshot_boundary", CaseSnapshotBoundary },
     { "short_func", CaseShortFunc },
     { "threads", CaseThreads },
+    { "suspend_failure", caseSuspensionFailure },
     { "reuse", CaseReuse },
+#ifdef _M_X64
+    { "pool", caseTrampolinePoolBookkeeping },
+#endif // _M_X64
     { "sweep", CaseSweep },
 };
 

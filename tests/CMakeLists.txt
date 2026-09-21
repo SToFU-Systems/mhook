@@ -26,6 +26,10 @@ set(statusCases
     invalid_unhook_slot_alignment
     invalid_unhook_slot_access
     invalid_unhook_slot_write
+    invalid_unhook_target_access
+    invalid_batch
+    invalid_batch_alignment
+    batch_failure_status
     invalid_unhook_address
     not_found
     thread_local
@@ -36,7 +40,11 @@ foreach(case IN LISTS statusCases)
     set_tests_properties(mhook.status.${case} PROPERTIES TIMEOUT 15)
 endforeach()
 
-foreach(language IN ITEMS c cpp)
+set(consumerLanguages
+    c
+    cpp
+)
+foreach(language IN LISTS consumerLanguages)
     add_executable(mhook-consumer-static-${language}-test consumer-${language}-test.${language})
     target_link_libraries(mhook-consumer-static-${language}-test PRIVATE mhook::mhook)
     # Verify that the public header compiles cleanly without private settings.
@@ -74,18 +82,40 @@ add_test(NAME mhook.consumer.direct.c COMMAND mhook-consumer-direct-c-test)
 set_tests_properties(mhook.consumer.direct.c PROPERTIES TIMEOUT 15)
 
 add_executable(mhook-hook-test hook-test.cpp)
-target_link_libraries(mhook-hook-test PRIVATE mhook::mhook)
+target_link_libraries(mhook-hook-test PRIVATE mhook::mhook Advapi32)
 mhook_configure_private_target(mhook-hook-test)
 
-foreach(case IN ITEMS basic trampoline restore conflict passthrough thunk snapshot_boundary short_func threads reuse sweep)
+set(hookCases
+    basic
+    batch
+    batch_prepare_failure
+    batch_conflict
+    batch_commit_failure
+    batch_unhook_prepare_failure
+    batch_unhook_conflict
+    batch_unhook_commit_failure
+    trampoline
+    restore
+    conflict
+    passthrough
+    thunk
+    snapshot_boundary
+    short_func
+    threads
+    suspend_failure
+    reuse
+    sweep
+)
+foreach(case IN LISTS hookCases)
     add_test(NAME mhook.hook.${case} COMMAND mhook-hook-test ${case})
+    set_tests_properties(mhook.hook.${case} PROPERTIES TIMEOUT 15)
 endforeach()
 
-set_tests_properties(
-    mhook.hook.basic mhook.hook.trampoline mhook.hook.restore
-    mhook.hook.conflict mhook.hook.passthrough mhook.hook.thunk
-    mhook.hook.snapshot_boundary mhook.hook.short_func
-    PROPERTIES TIMEOUT 15)
+if(MHOOK_ARCHITECTURE STREQUAL "x64")
+    add_test(NAME mhook.hook.pool COMMAND mhook-hook-test pool)
+    set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
+endif()
+
 # Every hook and unhook pair costs two system wide thread snapshots inside the
 # library, and that rate, not the hook engine, sets the runtime of the bulk
 # cases. They therefore sample by default, which is what these timeouts are
