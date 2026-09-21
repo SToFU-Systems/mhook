@@ -1,4 +1,0 @@
-sources:
-  "0.0.0-dev":
-    url: "https://github.com/SToFU-Systems/mhook/archive/refs/tags/<release-tag>.tar.gz"
-    sha256: "<sha256>"
