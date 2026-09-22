@@ -1,5 +1,8 @@
 add_executable(mhook-decoder-test decoder-test.cpp)
 target_link_libraries(mhook-decoder-test PRIVATE mhook::mhook)
+target_include_directories(mhook-decoder-test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/include"
+)
 mhook_configure_private_target(mhook-decoder-test)
 add_test(NAME mhook.decoder COMMAND mhook-decoder-test)
 set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
@@ -40,35 +43,63 @@ foreach(case IN LISTS statusCases)
     set_tests_properties(mhook.status.${case} PROPERTIES TIMEOUT 15)
 endforeach()
 
-set(consumerLanguages
-    c
-    cpp
-)
-foreach(language IN LISTS consumerLanguages)
-    add_executable(mhook-consumer-static-${language}-test consumer-${language}-test.${language})
-    target_link_libraries(mhook-consumer-static-${language}-test PRIVATE mhook::mhook)
+# The public header must compile cleanly for a consumer on every standard the
+# library claims to support, which is where a header portability break shows up
+# first. Under MSVC the three C rows build identically, because MSVC has no
+# /std:c99; MinGW is what makes that row meaningful.
+set(consumerCStandards 99 11 17)
+foreach(standard IN LISTS consumerCStandards)
+    set(target mhook-consumer-c${standard}-test)
+    add_executable(${target} consumer-c-test.c consumer-test.inc)
+    target_link_libraries(${target} PRIVATE mhook::mhook)
+    target_compile_features(${target} PRIVATE c_std_${standard})
+    set_target_properties(${target} PROPERTIES C_EXTENSIONS ON)
     # Verify that the public header compiles cleanly without private settings.
     if(MHOOK_COMPILER_MSVC)
-        target_compile_options(mhook-consumer-static-${language}-test PRIVATE /W3 /WX)
+        target_compile_options(${target} PRIVATE /W3 /WX)
     endif()
-    add_test(NAME mhook.consumer.static.${language} COMMAND mhook-consumer-static-${language}-test)
-    set_tests_properties(mhook.consumer.static.${language} PROPERTIES TIMEOUT 15)
+    add_test(NAME mhook.consumer.c${standard} COMMAND ${target})
+    set_tests_properties(mhook.consumer.c${standard} PROPERTIES TIMEOUT 15)
 endforeach()
 
+set(consumerCxxStandards 17 20)
+foreach(standard IN LISTS consumerCxxStandards)
+    set(target mhook-consumer-cpp${standard}-test)
+    add_executable(${target} consumer-cpp-test.cpp consumer-test.inc)
+    target_link_libraries(${target} PRIVATE mhook::mhook)
+    target_compile_features(${target} PRIVATE cxx_std_${standard})
+    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    if(MHOOK_COMPILER_MSVC)
+        target_compile_options(${target} PRIVATE /W3 /WX)
+    endif()
+    add_test(NAME mhook.consumer.cpp${standard} COMMAND ${target})
+    set_tests_properties(mhook.consumer.cpp${standard} PROPERTIES TIMEOUT 15)
+endforeach()
+
+source_group("test" FILES consumer-test.inc)
+
 set(directSources
-    "${PROJECT_SOURCE_DIR}/mhook-lib/mhook.c"
-    "${PROJECT_SOURCE_DIR}/disasm-lib/cpu.c"
-    "${PROJECT_SOURCE_DIR}/disasm-lib/disasm.c"
-    "${PROJECT_SOURCE_DIR}/disasm-lib/disasm_x86.c"
-    "${PROJECT_SOURCE_DIR}/disasm-lib/misc.c"
+    "${PROJECT_SOURCE_DIR}/src/mhook-lib/src/mhook.c"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/src/cpu.c"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/src/disasm.c"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/src/disasm_x86.c"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/src/misc.c"
 )
 
 add_executable(mhook-consumer-direct-c-test
     consumer-c-test.c
     ${directSources}
 )
-target_include_directories(mhook-consumer-direct-c-test PRIVATE "${PROJECT_SOURCE_DIR}")
-target_compile_features(mhook-consumer-direct-c-test PRIVATE c_std_11)
+target_include_directories(mhook-consumer-direct-c-test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/mhook-lib/include"
+    # mhook.h now includes <mhook-lib/version.h>, which is generated.
+    "${MHOOK_GENERATED_INCLUDE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src/mhook-lib/include/mhook-lib"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/include"
+    "${PROJECT_SOURCE_DIR}/src/disasm-lib/include/disasm-lib"
+)
+target_compile_features(mhook-consumer-direct-c-test PRIVATE c_std_99)
+set_target_properties(mhook-consumer-direct-c-test PROPERTIES C_EXTENSIONS ON)
 
 if(MHOOK_COMPILER_MSVC)
     target_compile_options(mhook-consumer-direct-c-test PRIVATE /W3)

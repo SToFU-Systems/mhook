@@ -14,14 +14,16 @@
 // See LICENSE in the repository root for the full license text.
 //================================================================================
 
-#include "consumer-test.inc"
+#pragma once
 
-/**
- * @brief Verifies the public API from a C consumer.
- *
- * @return Zero on success; otherwise nonzero.
- */
-int main(void)
-{
-    return mhookConsumerCheck();
-}
+/** Major version. Changes when the public interface breaks. */
+#define MHOOK_VERSION_MAJOR @MHOOK_VERSION_MAJOR@
+
+/** Minor version. Changes when the public interface grows compatibly. */
+#define MHOOK_VERSION_MINOR @MHOOK_VERSION_MINOR@
+
+/** Patch version. Changes for fixes that do not touch the interface. */
+#define MHOOK_VERSION_PATCH @MHOOK_VERSION_PATCH@
+
+/** Full version as a string literal, for example "3.0.0". */
+#define MHOOK_VERSION_STRING "@MHOOK_VERSION@"

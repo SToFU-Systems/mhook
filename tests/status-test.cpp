@@ -1,5 +1,12 @@
 //================================================================================
-// Mhook
+//    /$$      /$$ /$$   /$$                     /$$
+//   | $$$    /$$$| $$  | $$                    | $$
+//   | $$$$  /$$$$| $$  | $$  /$$$$$$   /$$$$$$ | $$   /$$
+//   | $$ $$/$$ $$| $$$$$$$$ /$$__  $$ /$$__  $$| $$  /$$/
+//   | $$  $$$| $$| $$__  $$| $$  \ $$| $$  \ $$| $$$$$$/
+//   | $$\  $ | $$| $$  | $$| $$  | $$| $$  | $$| $$_  $$
+//   | $$ \/  | $$| $$  | $$|  $$$$$$/|  $$$$$$/| $$ \  $$
+//   |__/     |__/|__/  |__/ \______/  \______/ |__/  \__/
 //
 // Copyright (c) 2026, SToFU Systems (https://stofu.io). All rights reserved.
 //
@@ -15,7 +22,7 @@
 #include <string.h>
 
 static constexpr uint32_t kTargetBufferSize = 64;
-static const BYTE kMovEaxRet[] = { 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+static const BYTE kMovEaxRet[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
 
 struct ThreadStatusContext
 {
@@ -40,14 +47,14 @@ static int HookReplacement(void)
     return 1337;
 }
 
-
 /**
  * @brief Allocates a deterministic executable target for descriptor tests.
  * @return The target buffer, or NULL when allocation fails.
  */
 static PBYTE allocateTarget(void)
 {
-    PBYTE target = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    PBYTE target =
+        static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
     if (!target)
         return NULL;
@@ -64,7 +71,6 @@ static PBYTE allocateTarget(void)
     return target;
 }
 
-
 /**
  * @brief Stores a pointer in storage that may not satisfy pointer alignment.
  * @param[out] destination Storage receiving the pointer bytes.
@@ -74,7 +80,6 @@ static void storePointer(OUT void* destination, PVOID value)
 {
     memcpy(destination, &value, sizeof(value));
 }
-
 
 /**
  * @brief Loads a pointer from storage that may not satisfy pointer alignment.
@@ -88,7 +93,6 @@ static PVOID loadPointer(const void* source)
     memcpy(&value, source, sizeof(value));
     return value;
 }
-
 
 /**
  * @brief Makes a test buffer executable after its bytes have been initialized.
@@ -105,7 +109,6 @@ static BOOL makeMemoryExecutable(PVOID memory, SIZE_T size)
 
     return FlushInstructionCache(GetCurrentProcess(), memory, size);
 }
-
 
 /**
  * @brief Writes a near relative jump between addresses in one test allocation.
@@ -128,7 +131,6 @@ static BOOL writeRelativeJump(OUT PBYTE instruction, PBYTE target)
     return TRUE;
 }
 
-
 /**
  * @brief Verifies that an invalid set request fails without changing caller or target state.
  * @param[in] systemFunction Requested system-function address.
@@ -139,7 +141,14 @@ static BOOL writeRelativeJump(OUT PBYTE instruction, PBYTE target)
  * @param[in] memorySize Number of target bytes in the snapshot.
  * @return Zero on success; otherwise a test failure code.
  */
-static int expectInvalidSet(PVOID systemFunction, PVOID hookFunction, MHOOK_STATUS expectedStatus, const void* observedMemory, const BYTE* expectedMemory, SIZE_T memorySize)
+static int expectInvalidSet(
+    PVOID systemFunction,
+    PVOID hookFunction,
+    MHOOK_STATUS expectedStatus,
+    const void* observedMemory,
+    const BYTE* expectedMemory,
+    SIZE_T memorySize
+)
 {
     PVOID descriptor = systemFunction;
     const BOOL result = Mhook_SetHook(&descriptor, hookFunction);
@@ -164,7 +173,6 @@ static int expectInvalidSet(PVOID systemFunction, PVOID hookFunction, MHOOK_STAT
 
     return 0;
 }
-
 
 /**
  * @brief Verifies that Mhook_SetHook rejects a pointer slot without changing readable state.
@@ -202,7 +210,6 @@ static int expectInvalidSetSlot(PVOID* slot, PVOID expectedPointer, const BYTE* 
     return 0;
 }
 
-
 /**
  * @brief Verifies that Mhook_Unhook rejects a pointer slot without changing readable state.
  * @param[in,out] slot Pointer slot supplied to Mhook_Unhook.
@@ -232,7 +239,6 @@ static int expectInvalidUnhookSlot(PVOID* slot, PVOID expectedPointer, const BYT
     return 0;
 }
 
-
 /**
  * @brief Verifies that an inaccessible system-function address is rejected safely.
  * @return Zero on success; otherwise a test failure code.
@@ -244,11 +250,11 @@ static int caseInvalidSetTargetAccess(void)
     if (!target)
         return Fail("VirtualAlloc for the inaccessible target failed");
 
-    const int result = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, NULL, NULL, 0);
+    const int result =
+        expectInvalidSet(target, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, NULL, NULL, 0);
     VirtualFree(target, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that a readable but non-executable system-function address is rejected.
@@ -266,11 +272,17 @@ static int caseInvalidSetTargetExecute(void)
     BYTE snapshot[kTargetBufferSize] = {};
     memcpy(snapshot, target, sizeof(snapshot));
 
-    const int result = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, target, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        target,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_INVALID_TARGET,
+        target,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(target, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that an inaccessible hook-function address is rejected safely.
@@ -298,7 +310,6 @@ static int caseInvalidSetHookAccess(void)
     return result;
 }
 
-
 /**
  * @brief Verifies that a thunk truncated by inaccessible memory is rejected safely.
  * @return Zero on success; otherwise a test failure code.
@@ -316,7 +327,7 @@ static int caseInvalidSetThunkBoundary(void)
 
     PBYTE thunk = memory + pageSize - 1;
     thunk[0] = 0xE9;
-    const BYTE snapshot[] = { 0xE9 };
+    const BYTE snapshot[] = {0xE9};
     DWORD oldProtection = 0;
     const BOOL executableResult = makeMemoryExecutable(memory, pageSize);
     const BOOL inaccessibleResult = VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &oldProtection);
@@ -327,11 +338,17 @@ static int caseInvalidSetThunkBoundary(void)
         return Fail("protecting the truncated thunk failed");
     }
 
-    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, thunk, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        thunk,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_INVALID_TARGET,
+        thunk,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(memory, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that an instruction truncated by inaccessible memory is rejected safely.
@@ -351,7 +368,7 @@ static int caseInvalidSetDecodeBoundary(void)
 
     PBYTE instruction = memory + pageSize - 1;
     instruction[0] = kMoveImmediateOpcode;
-    const BYTE snapshot[] = { kMoveImmediateOpcode };
+    const BYTE snapshot[] = {kMoveImmediateOpcode};
     DWORD oldProtection = 0;
     const BOOL executableResult = makeMemoryExecutable(memory, pageSize);
     const BOOL inaccessibleResult = VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &oldProtection);
@@ -362,11 +379,17 @@ static int caseInvalidSetDecodeBoundary(void)
         return Fail("protecting the truncated instruction failed");
     }
 
-    const int result = expectInvalidSet(instruction, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, instruction, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        instruction,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_INVALID_TARGET,
+        instruction,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(memory, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that an inaccessible indirect thunk slot is rejected safely.
@@ -410,11 +433,17 @@ static int caseInvalidSetThunkIndirect(void)
         return Fail("protecting the indirect thunk failed");
     }
 
-    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_INVALID_TARGET, thunk, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        thunk,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_INVALID_TARGET,
+        thunk,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(memory, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that a cyclic thunk is rejected without unbounded recursion.
@@ -440,11 +469,17 @@ static int caseInvalidSetThunkCycle(void)
         return Fail("protecting the cyclic thunk failed");
     }
 
-    const int result = expectInvalidSet(thunk, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_JUMP_CYCLE, thunk, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        thunk,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_JUMP_CYCLE,
+        thunk,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(thunk, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that an excessive acyclic thunk chain is rejected.
@@ -479,11 +514,17 @@ static int caseInvalidSetThunkDepth(void)
         return Fail("protecting the deep thunk chain failed");
     }
 
-    const int result = expectInvalidSet(memory, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_JUMP_DEPTH_EXCEEDED, memory, snapshot, sizeof(snapshot));
+    const int result = expectInvalidSet(
+        memory,
+        reinterpret_cast<PVOID>(&HookReplacement),
+        MHOOK_STATUS_JUMP_DEPTH_EXCEEDED,
+        memory,
+        snapshot,
+        sizeof(snapshot)
+    );
     VirtualFree(memory, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that self-hooks and requests reaching active targets are rejected before mutation.
@@ -507,7 +548,8 @@ static int caseInvalidSetConflict(void)
 
     const BOOL firstJumpResult = writeRelativeJump(firstThunk, target);
     const BOOL secondJumpResult = writeRelativeJump(secondThunk, target);
-    const BOOL protectionResult = firstJumpResult && secondJumpResult && makeMemoryExecutable(memory, kTargetBufferSize);
+    const BOOL protectionResult =
+        firstJumpResult && secondJumpResult && makeMemoryExecutable(memory, kTargetBufferSize);
     if (!protectionResult)
     {
         VirtualFree(memory, 0, MEM_RELEASE);
@@ -516,9 +558,17 @@ static int caseInvalidSetConflict(void)
 
     BYTE originalBytes[kTargetBufferSize] = {};
     memcpy(originalBytes, memory, sizeof(originalBytes));
-    int result = expectInvalidSet(target, target, MHOOK_STATUS_INVALID_ARGUMENT, memory, originalBytes, sizeof(originalBytes));
+    int result =
+        expectInvalidSet(target, target, MHOOK_STATUS_INVALID_ARGUMENT, memory, originalBytes, sizeof(originalBytes));
 
-    const int resolvedSelfResult = expectInvalidSet(firstThunk, target, MHOOK_STATUS_INVALID_ARGUMENT, memory, originalBytes, sizeof(originalBytes));
+    const int resolvedSelfResult = expectInvalidSet(
+        firstThunk,
+        target,
+        MHOOK_STATUS_INVALID_ARGUMENT,
+        memory,
+        originalBytes,
+        sizeof(originalBytes)
+    );
     if (!result)
         result = resolvedSelfResult;
 
@@ -531,11 +581,25 @@ static int caseInvalidSetConflict(void)
 
     BYTE hookedBytes[kTargetBufferSize] = {};
     memcpy(hookedBytes, memory, sizeof(hookedBytes));
-    const int directDuplicateResult = expectInvalidSet(target, reinterpret_cast<PVOID>(&HookTarget), MHOOK_STATUS_ALREADY_HOOKED, memory, hookedBytes, sizeof(hookedBytes));
+    const int directDuplicateResult = expectInvalidSet(
+        target,
+        reinterpret_cast<PVOID>(&HookTarget),
+        MHOOK_STATUS_ALREADY_HOOKED,
+        memory,
+        hookedBytes,
+        sizeof(hookedBytes)
+    );
     if (!result)
         result = directDuplicateResult;
 
-    const int resolvedDuplicateResult = expectInvalidSet(secondThunk, reinterpret_cast<PVOID>(&HookTarget), MHOOK_STATUS_ALREADY_HOOKED, memory, hookedBytes, sizeof(hookedBytes));
+    const int resolvedDuplicateResult = expectInvalidSet(
+        secondThunk,
+        reinterpret_cast<PVOID>(&HookTarget),
+        MHOOK_STATUS_ALREADY_HOOKED,
+        memory,
+        hookedBytes,
+        sizeof(hookedBytes)
+    );
     if (!result)
         result = resolvedDuplicateResult;
 
@@ -549,7 +613,14 @@ static int caseInvalidSetConflict(void)
 
     BYTE availableBytes[kTargetBufferSize] = {};
     memcpy(availableBytes, availableTarget, sizeof(availableBytes));
-    const int replacementConflictResult = expectInvalidSet(availableTarget, secondThunk, MHOOK_STATUS_ALREADY_HOOKED, availableTarget, availableBytes, sizeof(availableBytes));
+    const int replacementConflictResult = expectInvalidSet(
+        availableTarget,
+        secondThunk,
+        MHOOK_STATUS_ALREADY_HOOKED,
+        availableTarget,
+        availableBytes,
+        sizeof(availableBytes)
+    );
     if (!result)
         result = replacementConflictResult;
     VirtualFree(availableTarget, 0, MEM_RELEASE);
@@ -565,7 +636,6 @@ static int caseInvalidSetConflict(void)
 
     return result;
 }
-
 
 /**
  * @brief Verifies that Mhook_SetHook rejects a misaligned pointer slot.
@@ -589,7 +659,6 @@ static int caseInvalidSetSlotAlignment(void)
     return result;
 }
 
-
 /**
  * @brief Verifies that Mhook_SetHook rejects an inaccessible pointer slot.
  * @return Zero on success; otherwise a test failure code.
@@ -605,7 +674,6 @@ static int caseInvalidSetSlotAccess(void)
     VirtualFree(slot, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that Mhook_SetHook rejects a read-only pointer slot.
@@ -644,7 +712,6 @@ static int caseInvalidSetSlotWrite(void)
     return result;
 }
 
-
 /**
  * @brief Verifies that Mhook_Unhook rejects a misaligned pointer slot.
  * @return Zero on success; otherwise a test failure code.
@@ -676,7 +743,6 @@ static int caseInvalidUnhookSlotAlignment(void)
     return result;
 }
 
-
 /**
  * @brief Verifies that Mhook_Unhook rejects an inaccessible pointer slot.
  * @return Zero on success; otherwise a test failure code.
@@ -692,7 +758,6 @@ static int caseInvalidUnhookSlotAccess(void)
     VirtualFree(slot, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that Mhook_Unhook rejects a read-only pointer slot.
@@ -740,7 +805,6 @@ static int caseInvalidUnhookSlotWrite(void)
     VirtualFree(target, 0, MEM_RELEASE);
     return result;
 }
-
 
 /**
  * @brief Verifies that unhook rejects an inaccessible target without losing the registered hook.
@@ -858,7 +922,6 @@ static int CaseInvalidUnhook(void)
     return 0;
 }
 
-
 /**
  * @brief Verifies that batch operations reject an empty request without changing LastError.
  * @return Zero on success; otherwise a test failure code.
@@ -885,7 +948,6 @@ static int caseInvalidBatch(void)
 
     return 0;
 }
-
 
 /**
  * @brief Verifies that batch operations reject a misaligned descriptor array.
@@ -974,7 +1036,6 @@ static int caseInvalidBatchAlignment(void)
     return 0;
 }
 
-
 /**
  * @brief Verifies that batch entry and overall statuses report the operation failure.
  * @return Zero on success; otherwise a test failure code.
@@ -983,12 +1044,7 @@ static int caseBatchFailureStatus(void)
 {
     const DWORD kCallerLastError = ERROR_ACCESS_DENIED;
     PVOID nullTarget = NULL;
-    MHOOK_HOOK_INFO setHook =
-    {
-        &nullTarget,
-        reinterpret_cast<PVOID>(&HookReplacement),
-        MHOOK_STATUS_SUCCESS
-    };
+    MHOOK_HOOK_INFO setHook = {&nullTarget, reinterpret_cast<PVOID>(&HookReplacement), MHOOK_STATUS_SUCCESS};
 
     SetLastError(kCallerLastError);
     if (Mhook_SetHookBatch(&setHook, 1))
@@ -1001,7 +1057,7 @@ static int caseBatchFailureStatus(void)
         return Fail("a failed set batch changed the caller's last error");
 
     PVOID unknownTarget = reinterpret_cast<PVOID>(&HookTarget);
-    MHOOK_HOOK_INFO unhook = { &unknownTarget, NULL, MHOOK_STATUS_SUCCESS };
+    MHOOK_HOOK_INFO unhook = {&unknownTarget, NULL, MHOOK_STATUS_SUCCESS};
     SetLastError(kCallerLastError);
     if (Mhook_UnhookBatch(&unhook, 1))
         return Fail("Mhook_UnhookBatch accepted an unknown hook");
@@ -1014,7 +1070,6 @@ static int caseBatchFailureStatus(void)
 
     return 0;
 }
-
 
 /**
  * @brief Verifies that an unowned trampoline value is rejected without being dereferenced.
@@ -1034,7 +1089,6 @@ static int caseInvalidUnhookAddress(void)
 
     return 0;
 }
-
 
 static int CaseNotFound(void)
 {
@@ -1102,7 +1156,8 @@ static int CaseSuccess(void)
     if (Mhook_GetLastStatus() != MHOOK_STATUS_HOOK_NOT_FOUND)
         return Fail("the setup failure did not report HOOK_NOT_FOUND");
 
-    PBYTE target = static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    PBYTE target =
+        static_cast<PBYTE>(VirtualAlloc(NULL, kTargetBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
     if (!target)
         return Fail("VirtualAlloc for the target buffer failed");
@@ -1126,32 +1181,32 @@ struct StatusTestCase
 };
 
 static const StatusTestCase kStatusTestCases[] = {
-    { "initial", CaseInitial },
-    { "invalid_set", CaseInvalidSet },
-    { "invalid_set_target_access", caseInvalidSetTargetAccess },
-    { "invalid_set_target_execute", caseInvalidSetTargetExecute },
-    { "invalid_set_hook_access", caseInvalidSetHookAccess },
-    { "invalid_set_thunk_boundary", caseInvalidSetThunkBoundary },
-    { "invalid_set_decode_boundary", caseInvalidSetDecodeBoundary },
-    { "invalid_set_thunk_indirect", caseInvalidSetThunkIndirect },
-    { "invalid_set_thunk_cycle", caseInvalidSetThunkCycle },
-    { "invalid_set_thunk_depth", caseInvalidSetThunkDepth },
-    { "invalid_set_conflict", caseInvalidSetConflict },
-    { "invalid_set_slot_alignment", caseInvalidSetSlotAlignment },
-    { "invalid_set_slot_access", caseInvalidSetSlotAccess },
-    { "invalid_set_slot_write", caseInvalidSetSlotWrite },
-    { "invalid_unhook", CaseInvalidUnhook },
-    { "invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment },
-    { "invalid_unhook_slot_access", caseInvalidUnhookSlotAccess },
-    { "invalid_unhook_slot_write", caseInvalidUnhookSlotWrite },
-    { "invalid_unhook_target_access", caseInvalidUnhookTargetAccess },
-    { "invalid_batch", caseInvalidBatch },
-    { "invalid_batch_alignment", caseInvalidBatchAlignment },
-    { "batch_failure_status", caseBatchFailureStatus },
-    { "invalid_unhook_address", caseInvalidUnhookAddress },
-    { "not_found", CaseNotFound },
-    { "thread_local", CaseThreadLocal },
-    { "success", CaseSuccess }
+    {"initial", CaseInitial},
+    {"invalid_set", CaseInvalidSet},
+    {"invalid_set_target_access", caseInvalidSetTargetAccess},
+    {"invalid_set_target_execute", caseInvalidSetTargetExecute},
+    {"invalid_set_hook_access", caseInvalidSetHookAccess},
+    {"invalid_set_thunk_boundary", caseInvalidSetThunkBoundary},
+    {"invalid_set_decode_boundary", caseInvalidSetDecodeBoundary},
+    {"invalid_set_thunk_indirect", caseInvalidSetThunkIndirect},
+    {"invalid_set_thunk_cycle", caseInvalidSetThunkCycle},
+    {"invalid_set_thunk_depth", caseInvalidSetThunkDepth},
+    {"invalid_set_conflict", caseInvalidSetConflict},
+    {"invalid_set_slot_alignment", caseInvalidSetSlotAlignment},
+    {"invalid_set_slot_access", caseInvalidSetSlotAccess},
+    {"invalid_set_slot_write", caseInvalidSetSlotWrite},
+    {"invalid_unhook", CaseInvalidUnhook},
+    {"invalid_unhook_slot_alignment", caseInvalidUnhookSlotAlignment},
+    {"invalid_unhook_slot_access", caseInvalidUnhookSlotAccess},
+    {"invalid_unhook_slot_write", caseInvalidUnhookSlotWrite},
+    {"invalid_unhook_target_access", caseInvalidUnhookTargetAccess},
+    {"invalid_batch", caseInvalidBatch},
+    {"invalid_batch_alignment", caseInvalidBatchAlignment},
+    {"batch_failure_status", caseBatchFailureStatus},
+    {"invalid_unhook_address", caseInvalidUnhookAddress},
+    {"not_found", CaseNotFound},
+    {"thread_local", CaseThreadLocal},
+    {"success", CaseSuccess}
 };
 
 int main(int argc, char** argv)
