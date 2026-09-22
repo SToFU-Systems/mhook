@@ -1,0 +1,20 @@
+{
+    "recommendations": [
+        "ms-vscode.cpptools",
+        "jeff-hykin.better-cpp-syntax",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "ms-vscode.test-adapter-converter",
+        "hbenl.vscode-test-explorer",
+        "fredericbonnet.cmake-test-adapter",
+        "ms-python.python",
+        "EditorConfig.EditorConfig",
+        "cschlosser.doxdocgen",
+        "usernamehw.errorlens",
+        "eamodio.gitlens",
+        "aaron-bond.better-comments",
+        "Gruntfuggly.todo-tree",
+        "ionutvmi.path-autocomplete",
+        "ClemensPeters.format-json"
+    ]
+}

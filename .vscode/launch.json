@@ -1,0 +1,301 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(MSVC) mhook-hook-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-hook-test.exe",
+            "args": [
+                "${input:hookCase}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-status-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-status-test.exe",
+            "args": [
+                "${input:statusCase}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-decoder-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-decoder-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-c99-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-c99-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-c11-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-c11-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-c17-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-c17-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-cpp17-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-cpp17-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-cpp20-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-cpp20-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-consumer-direct-c-test",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/tests/${input:msvcConfig}/mhook-consumer-direct-c-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MSVC) mhook-example",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:msvcArch}/examples/${input:msvcConfig}/mhook-example.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false
+        },
+        {
+            "name": "(MinGW) mhook-hook-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-hook-test.exe",
+            "args": [
+                "${input:hookCase}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-status-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-status-test.exe",
+            "args": [
+                "${input:statusCase}"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-decoder-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-decoder-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-c99-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-c99-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-c11-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-c11-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-c17-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-c17-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-cpp17-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-cpp17-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-cpp20-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-cpp20-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-consumer-direct-c-test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/tests/mhook-consumer-direct-c-test.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MinGW) mhook-example",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/_build/${input:mingwArch}/${input:mingwConfig}/examples/mhook-example.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${input:mingwGdb}"
+        },
+        {
+            "name": "(MSVC) Attach to process",
+            "type": "cppvsdbg",
+            "request": "attach",
+            "processId": "${command:pickProcess}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "msvcArch",
+            "type": "pickString",
+            "description": "MSVC architecture",
+            "options": [
+                "x64",
+                "x86"
+            ],
+            "default": "x64"
+        },
+        {
+            "id": "msvcConfig",
+            "type": "pickString",
+            "description": "MSVC configuration",
+            "options": [
+                "Debug",
+                "Release",
+                "RelWithDebInfo"
+            ],
+            "default": "Debug"
+        },
+        {
+            "id": "mingwArch",
+            "type": "pickString",
+            "description": "MinGW architecture",
+            "options": [
+                "mingw-x64",
+                "mingw-x86"
+            ],
+            "default": "mingw-x64"
+        },
+        {
+            "id": "mingwConfig",
+            "type": "pickString",
+            "description": "MinGW configuration",
+            "options": [
+                "debug",
+                "release",
+                "relwithdebinfo"
+            ],
+            "default": "debug"
+        },
+        {
+            "id": "mingwGdb",
+            "type": "promptString",
+            "description": "Path to gdb.exe from the MinGW toolchain",
+            "default": "${env:MHOOK_MINGW_X64_ROOT}/bin/gdb.exe"
+        },
+        {
+            "id": "hookCase",
+            "type": "promptString",
+            "description": "hook-test case name, for example basic or trampoline",
+            "default": "basic"
+        },
+        {
+            "id": "statusCase",
+            "type": "promptString",
+            "description": "status-test case name, for example initial or not_found",
+            "default": "initial"
+        }
+    ]
+}

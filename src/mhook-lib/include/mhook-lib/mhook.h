@@ -1,48 +1,49 @@
 //================================================================================
-// Mhook
+//    /$$      /$$ /$$   /$$                     /$$
+//   | $$$    /$$$| $$  | $$                    | $$
+//   | $$$$  /$$$$| $$  | $$  /$$$$$$   /$$$$$$ | $$   /$$
+//   | $$ $$/$$ $$| $$$$$$$$ /$$__  $$ /$$__  $$| $$  /$$/
+//   | $$  $$$| $$| $$__  $$| $$  \ $$| $$  \ $$| $$$$$$/
+//   | $$\  $ | $$| $$  | $$| $$  | $$| $$  | $$| $$_  $$
+//   | $$ \/  | $$| $$  | $$|  $$$$$$/|  $$$$$$/| $$ \  $$
+//   |__/     |__/|__/  |__/ \______/  \______/ |__/  \__/
 //
 // Modifications and original additions:
 // Copyright (c) 2026, SToFU Systems (https://stofu.io). All rights reserved.
 //
 // Licensed under the MIT License.
 // See LICENSE in the repository root for the full license text.
+//
+// Original author:
+//
+// Copyright (c) 2007-2008, Marton Anka
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+// IN THE SOFTWARE.
 //================================================================================
-
-//Copyright (c) 2007-2008, Marton Anka
-//
-//Permission is hereby granted, free of charge, to any person obtaining a 
-//copy of this software and associated documentation files (the "Software"), 
-//to deal in the Software without restriction, including without limitation 
-//the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-//and/or sell copies of the Software, and to permit persons to whom the 
-//Software is furnished to do so, subject to the following conditions:
-//
-//The above copyright notice and this permission notice shall be included 
-//in all copies or substantial portions of the Software.
-//
-//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
-//OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL 
-//THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
-//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
-//FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
-//IN THE SOFTWARE.
 
 #pragma once
 
-/**
- * @file
- * @brief Public interface of the Mhook function hooking library.
- *
- * A hook overwrites the start of the target's prologue with a jump, and moves
- * the displaced instructions into a trampoline that jumps back to the rest of
- * the function, so the replacement can still call the code it replaced.
- *
- * All entry points serialise on one process wide lock. Installing and removing
- * a hook suspends the other threads of the process for the duration.
- */
-
 #include <windows.h>
+
+// Pulled in here so that including the public header is enough to get the
+// version macros; a consumer should not have to know a second header exists.
+#include <mhook-lib/version.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -105,7 +106,6 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_ALREADY_HOOKED = 14
 } MHOOK_STATUS;
 
-
 /**
  * @brief Carries one hook request and its result through batch operations.
  *
@@ -124,15 +124,14 @@ typedef struct MHOOK_HOOK_INFO
     MHOOK_STATUS status;
 } MHOOK_HOOK_INFO;
 
-
 /**
  * @name Error codes reported through GetLastError()
  * The values sit in the range Windows reserves for application defined codes.
  * @{
  */
 
- /** The pointer does not name a hook that is currently installed. */
-#define MHOOK_ERROR_NOT_HOOKED      ((DWORD)((1UL << 29) | 1UL))
+/** The pointer does not name a hook that is currently installed. */
+#define MHOOK_ERROR_NOT_HOOKED ((DWORD)((1UL << 29) | 1UL))
 
 /** Another writer has patched the target since. See Mhook_Unhook(). */
 #define MHOOK_ERROR_TARGET_MODIFIED ((DWORD)((1UL << 29) | 2UL))
@@ -158,7 +157,7 @@ typedef struct MHOOK_HOOK_INFO
  * @note Fails if the prologue does not decode into at least five bytes of whole
  *       instructions. Retrieve failure details with Mhook_GetLastStatus().
  */
-BOOL Mhook_SetHook(PVOID *ppSystemFunction, PVOID pHookFunction);
+BOOL Mhook_SetHook(PVOID* ppSystemFunction, PVOID pHookFunction);
 
 
 /**
@@ -203,7 +202,7 @@ BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
  * @warning The trampoline is not freed, since a thread may still be running in
  *          it, but it must not be called once this returns TRUE.
  */
-BOOL Mhook_Unhook(PVOID *ppHookedFunction);
+BOOL Mhook_Unhook(PVOID* ppHookedFunction);
 
 
 /**
@@ -255,6 +254,18 @@ PVOID Mhook_GetTarget(PVOID pHookedFunction);
  *         the calling thread.
  */
 MHOOK_STATUS Mhook_GetLastStatus(void);
+
+
+/**
+ * @brief Returns the version of the library that is actually linked in.
+ *
+ * The MHOOK_VERSION_* macros describe the headers a caller compiled against.
+ * This describes the binary those calls land in, which is the version that
+ * matters when the library arrives prebuilt and the two can disagree.
+ *
+ * @return A static string of the form "3.0.0". The caller does not own it.
+ */
+const char* Mhook_GetVersion(void);
 
 #ifdef __cplusplus
 }

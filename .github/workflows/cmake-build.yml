@@ -28,17 +28,17 @@ jobs:
 
             - name: Configure
               run: |
-                  cmake --preset msvc-${{ matrix.architecture }} 2>&1 | Tee-Object -FilePath configure.log
+                  cmake --preset ${{ matrix.architecture }}-${{ matrix.configuration }}-configuration 2>&1 | Tee-Object -FilePath configure.log
                   exit $LASTEXITCODE
 
             - name: Build
               run: |
-                  cmake --build --preset msvc-${{ matrix.architecture }}-${{ matrix.configuration }} --parallel 2>&1 | Tee-Object -FilePath build.log
+                  cmake --build --preset ${{ matrix.architecture }}-${{ matrix.configuration }}-build --parallel 2>&1 | Tee-Object -FilePath build.log
                   exit $LASTEXITCODE
 
             - name: Test
               run: |
-                  ctest --preset msvc-${{ matrix.architecture }}-${{ matrix.configuration }} 2>&1 | Tee-Object -FilePath test.log
+                  ctest --preset ${{ matrix.architecture }}-${{ matrix.configuration }}-test 2>&1 | Tee-Object -FilePath test.log
                   exit $LASTEXITCODE
 
             - name: Upload failure logs
@@ -50,6 +50,88 @@ jobs:
                       configure.log
                       build.log
                       test.log
-                      build/msvc-${{ matrix.architecture }}/CMakeCache.txt
-                      build/msvc-${{ matrix.architecture }}/CMakeFiles/CMakeConfigureLog.yaml
-                      build/msvc-${{ matrix.architecture }}/Testing/Temporary/
+                      _build/${{ matrix.architecture }}/CMakeCache.txt
+                      _build/${{ matrix.architecture }}/CMakeFiles/CMakeConfigureLog.yaml
+                      _build/${{ matrix.architecture }}/Testing/Temporary/
+
+    mingw:
+        name: MinGW ${{ matrix.architecture }} ${{ matrix.configuration }}
+        runs-on: windows-2022
+        timeout-minutes: 25
+
+        strategy:
+            fail-fast: false
+            matrix:
+                architecture: [x86, x64]
+                configuration: [debug, release]
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+
+            # winlibs rather than MSYS2: MSYS2 wound down 32-bit support and
+            # removed the mingw-w64-i686 packages, so it can only supply x64.
+            # One mechanism for both architectures keeps the GCC versions
+            # aligned and the run reproducible.
+            - name: Install MinGW toolchain
+              shell: pwsh
+              run: |
+                  $url = if ('${{ matrix.architecture }}' -eq 'x64') { $env:WINLIBS_X64_URL } else { $env:WINLIBS_X86_URL }
+                  Invoke-WebRequest -Uri $url -OutFile toolchain.7z
+                  7z x toolchain.7z -o"$env:RUNNER_TEMP\mingw"
+                  $root = (Get-ChildItem "$env:RUNNER_TEMP\mingw" -Directory | Select-Object -First 1).FullName
+                  if ('${{ matrix.architecture }}' -eq 'x64') {
+                      "MHOOK_MINGW_X64_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  } else {
+                      "MHOOK_MINGW_X86_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  }
+              env:
+                  WINLIBS_X64_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.7z
+                  WINLIBS_X86_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-i686-posix-dwarf-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.7z
+
+            - name: Configure
+              run: cmake --preset mingw-${{ matrix.architecture }}-${{ matrix.configuration }}-configuration
+
+            - name: Build
+              run: cmake --build --preset mingw-${{ matrix.architecture }}-${{ matrix.configuration }}-build --parallel
+
+            - name: Test
+              run: ctest --preset mingw-${{ matrix.architecture }}-${{ matrix.configuration }}-test
+
+    format:
+        name: Format check
+        runs-on: windows-2022
+        timeout-minutes: 10
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+
+            - name: Install clang-format
+              run: pip install clang-format==20.1.8
+
+            - name: Check formatting
+              run: .\setup.bat --format-check
+
+    docs:
+        name: Documentation
+        runs-on: windows-2022
+        timeout-minutes: 15
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+
+            - name: Install Doxygen
+              run: |
+                  choco install doxygen.install --no-progress
+                  "C:\Program Files\doxygen\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+            - name: Build documentation
+              run: .\setup.bat --docs
+
+            - name: Upload documentation
+              uses: actions/upload-artifact@v7
+              with:
+                  name: docs-html
+                  path: _docs/html/

@@ -1,0 +1,423 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build: x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x64-debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x64-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x64-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x86-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x86-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build x86-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: mingw-x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x64-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "build: mingw-x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x64-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "build: mingw-x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x64-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "build: mingw-x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x86-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "build: mingw-x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x86-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "build: mingw-x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --build mingw-x86-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "test: x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x64-debug",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x64-release",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x64-relwithdebinfo",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x86-debug",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x86-release",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests x86-relwithdebinfo",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x64-debug",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x64-release",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x64-relwithdebinfo",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x86-debug",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x86-release",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "test: mingw-x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --run-tests mingw-x86-relwithdebinfo",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x64-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x64-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x64-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x86-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x86-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package x86-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x64-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x64-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x64-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x64-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x64-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x64-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x86-debug",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x86-debug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x86-release",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x86-release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "package: mingw-x86-relwithdebinfo",
+            "type": "shell",
+            "command": "cmd /c setup.bat --package mingw-x86-relwithdebinfo",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "docs: build",
+            "type": "shell",
+            "command": "cmd /c setup.bat --docs",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "format: apply",
+            "type": "shell",
+            "command": "cmd /c setup.bat --format",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "format: check",
+            "type": "shell",
+            "command": "cmd /c setup.bat --format-check",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "cmd /c setup.bat --clean",
+            "group": "none",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        }
+    ]
+}

@@ -2,11 +2,31 @@ if(NOT WIN32)
     message(FATAL_ERROR "Mhook supports Windows targets only.")
 endif()
 
-if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "MSVC"
-        AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+# CXX is not always an enabled language at this point: the root CMakeLists.txt
+# only enables it when tests or examples are built, and this file is included
+# before that guard. CMAKE_CXX_COMPILER_ID is empty when CXX is not enabled,
+# so only fold it into the check when CXX is actually available; otherwise a
+# pure-C configure would fail both branches below on an empty compiler id.
+get_property(MHOOK_ENABLED_LANGUAGES GLOBAL PROPERTY ENABLED_LANGUAGES)
+if("CXX" IN_LIST MHOOK_ENABLED_LANGUAGES)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        set(MHOOK_CXX_IS_MSVC TRUE)
+    else()
+        set(MHOOK_CXX_IS_MSVC FALSE)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(MHOOK_CXX_IS_GNU TRUE)
+    else()
+        set(MHOOK_CXX_IS_GNU FALSE)
+    endif()
+else()
+    set(MHOOK_CXX_IS_MSVC TRUE)
+    set(MHOOK_CXX_IS_GNU TRUE)
+endif()
+
+if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "MSVC" AND MHOOK_CXX_IS_MSVC)
     set(MHOOK_COMPILER_MSVC TRUE)
-elseif(MINGW AND CMAKE_C_COMPILER_ID STREQUAL "GNU"
-        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+elseif(MINGW AND CMAKE_C_COMPILER_ID STREQUAL "GNU" AND MHOOK_CXX_IS_GNU)
     set(MHOOK_COMPILER_MINGW TRUE)
 else()
     message(FATAL_ERROR "Use MSVC or MinGW GCC for both C and C++.")
@@ -53,4 +73,4 @@ function(mhook_configure_private_target target)
     endif()
 endfunction()
 
-message(STATUS "Mhook target: ${MHOOK_ARCHITECTURE} / ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "Mhook target: ${MHOOK_ARCHITECTURE} / ${CMAKE_C_COMPILER_ID}")

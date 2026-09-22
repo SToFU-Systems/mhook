@@ -1,0 +1,7 @@
+# Git hooks and shell scripts must keep LF endings: Git's bundled sh tolerates
+# CRLF, but WSL and containers fail with "bad interpreter: /bin/sh^M".
+# Batch files keep CRLF. Matches .editorconfig.
+* text=auto
+*.sh text eol=lf
+.githooks/* text eol=lf
+*.bat text eol=crlf

@@ -7,6 +7,7 @@ A Windows API hooking library.
 - [Overview](#overview)
 - [License](#license)
 - [Usage](#usage)
+- [Documentation](#documentation)
 - [Build](#build)
 - [Version History](#version-history)
 
@@ -48,58 +49,123 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_JUMP_DEPTH_EXCEEDED` | Entry-point jump resolution would follow more than 16 jumps. | Shorten the thunk chain before retrying. |
 | `MHOOK_STATUS_ALREADY_HOOKED` | Either the requested target or replacement resolution chain reached a target with an active hook. | Reuse or remove the existing hook before retrying. |
 
+## Documentation
+
+The API reference documents the public interface, rendered from the Doxygen
+comments in `mhook-lib/mhook.h` through Breathe and Sphinx.
+
+Build it with:
+
+```powershell
+setup.bat --docs
+```
+
+The result lands in `_docs/html/index.html`.
+
+Doxygen must be on `PATH`. The Python packages are provisioned automatically
+and are never installed system wide: `setup.bat` provides the virtual
+environment, and `--docs` installs the versions pinned in
+`docs/requirements.txt` into it. It is the only command that needs a
+third-party package; the library build itself needs none.
+
+CI builds the documentation on every pull request and uploads the rendered HTML
+as a build artifact, so it can be read without building anything locally.
+
 ## Build
 
 ### Requirements
 
 - Windows, targeting x86 or x64.
 - CMake 3.24 or newer, available on `PATH`.
+- Python 3.9 or newer, for `setup.bat`.
 - For MSVC builds: Visual Studio 2022 or Build Tools 2022 with C++ tools and a Windows SDK.
+- For MinGW builds: a MinGW-w64 GCC toolchain, with its root in `MHOOK_MINGW_X86_ROOT` or `MHOOK_MINGW_X64_ROOT`.
+- clang-format 20.1.8, for `setup.bat --format` and the pre-commit hook.
 
-### Configure and build
+### setup.bat
 
-Run these commands from the repository root:
+`setup.bat` is the single entry point for every build task. It checks that
+Python is on `PATH`, creates `.venv` on first use and runs everything inside
+it, so no command this project offers installs a package into your global
+site-packages. The Git hooks, the VS Code tasks and CI all route through it for
+the same reason.
+
+| Command | Effect |
+| --- | --- |
+| `setup.bat --build TYPE` | Configure, build and install |
+| `setup.bat --run-tests TYPE` | Build, then run the tests with JUnit and HTML reports |
+| `setup.bat --package TYPE` | The full pipeline, then package with CPack |
+| `setup.bat --docs` | Generate the API documentation into `_docs/html/` |
+| `setup.bat --format` | Format the sources with clang-format |
+| `setup.bat --format-check` | Check formatting without modifying files |
+| `setup.bat --clean` | Remove `_build`, `_install`, `_package` and `_docs` |
+
+`TYPE` is `<arch>-<config>`:
+
+| Architecture | Configuration |
+| --- | --- |
+| `x86`, `x64`, `mingw-x86`, `mingw-x64` | `debug`, `release`, `relwithdebinfo` |
+
+For example:
 
 ```powershell
-cmake --preset msvc-[x86/x64]
-cmake --build --preset msvc-[x86/x64]-[debug/release]
+setup.bat --build x64-debug
+setup.bat --run-tests x86-release
+setup.bat --package x64-relwithdebinfo
 ```
 
-### Run tests
+### CMake presets directly
 
 ```powershell
-ctest --preset msvc-[x86/x64]-[debug/release]
+cmake --preset x64-debug-configuration
+cmake --build --preset x64-debug-build
+ctest --preset x64-debug-test
 ```
+
+MinGW presets follow the same pattern with a `mingw-` prefix on the
+architecture, and activate only when the matching environment variable is set.
 
 ### Install
 
-Run `python build.py`, select an MSVC preset, then select **Install**. The script
-configures, builds, tests, and installs Mhook to `build/install/<preset>`.
-Each architecture and configuration has its own install directory.
+`setup.bat --build TYPE` installs into `_install/<arch>/<config>`. Each
+architecture and configuration has its own install directory.
 
 An installed package can be used from another CMake project:
 
 ```cmake
-find_package(mhook CONFIG REQUIRED)
+find_package(mhook 3.0 CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE mhook::mhook)
 ```
 
 Configure that project with `CMAKE_PREFIX_PATH` pointing to the chosen install
 directory. The public header is available as `<mhook-lib/mhook.h>`.
 
-### MinGW (WIP)
+### Use as a subproject
 
-```powershell
-cmake --preset mingw-[x86/x64]-[debug/release]
-cmake --build --preset mingw-[x86/x64]-[debug/release]
-ctest --preset mingw-[x86/x64]-[debug/release]
+Mhook can also be consumed directly from source, with `FetchContent` or a
+plain `add_subdirectory`:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(mhook
+    GIT_REPOSITORY https://github.com/SToFU-Systems/mhook.git
+    GIT_TAG        v3.0.0)
+FetchContent_MakeAvailable(mhook)
+
+target_link_libraries(your_target PRIVATE mhook::mhook)
 ```
+
+Consumed this way, mhook builds neither its tests nor its examples, and it does
+not touch your project's packaging. Its tests are gated on
+`MHOOK_BUILD_TESTING` rather than the usual `BUILD_TESTING`, so enabling CTest
+in your own project does not drag them into your build; pass
+`-DMHOOK_BUILD_TESTING=ON` if you do want them.
 
 ## Version History
 
 | Version | Date | Highlights |
 | --- | --- | --- |
-| |  |  |
+| 3.0.0 | 2026-09-22 | Template layout, C99, versioned package, generated docs. |
 | [Original 2.4](https://github.com/martona/mhook/tree/v2.4) | 2014-03-05 | Last original release. |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed changes.

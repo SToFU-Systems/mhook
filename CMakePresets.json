@@ -1,289 +1,190 @@
 {
-  "version": 5,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 24,
-    "patch": 0
-  },
-  "configurePresets": [
-    {
-      "name": "msvc",
-      "hidden": true,
-      "generator": "Visual Studio 17 2022",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
-      "cacheVariables": {
-        "BUILD_TESTING": true,
-        "MHOOK_BUILD_EXAMPLES": true,
-        "MHOOK_ENABLE_SANITY_CHECKS": true
-      }
-    },
-    {
-      "name": "msvc-x86",
-      "displayName": "MSVC x86",
-      "inherits": "msvc",
-      "architecture": "Win32"
-    },
-    {
-      "name": "msvc-x64",
-      "displayName": "MSVC x64",
-      "inherits": "msvc",
-      "architecture": "x64"
-    },
-    {
-      "name": "mingw",
-      "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "BUILD_TESTING": true,
-        "MHOOK_BUILD_EXAMPLES": true,
-        "MHOOK_ENABLE_SANITY_CHECKS": true
-      }
-    },
-    {
-      "name": "mingw-x86-debug",
-      "displayName": "MinGW x86 Debug (experimental)",
-      "inherits": "mingw",
-      "condition": {
-        "type": "allOf",
-        "conditions": [
-          {
-            "type": "equals",
-            "lhs": "${hostSystemName}",
-            "rhs": "Windows"
-          },
-          {
-            "type": "notEquals",
-            "lhs": "$env{MHOOK_MINGW_X86_ROOT}",
-            "rhs": ""
-          }
-        ]
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/g++.exe",
-        "MHOOK_EXPECTED_ARCHITECTURE": "x86"
-      },
-      "environment": {
-        "PATH": "$env{MHOOK_MINGW_X86_ROOT}/bin;$penv{PATH}"
-      }
-    },
-    {
-      "name": "mingw-x86-release",
-      "displayName": "MinGW x86 Release (experimental)",
-      "inherits": "mingw",
-      "condition": {
-        "type": "allOf",
-        "conditions": [
-          {
-            "type": "equals",
-            "lhs": "${hostSystemName}",
-            "rhs": "Windows"
-          },
-          {
-            "type": "notEquals",
-            "lhs": "$env{MHOOK_MINGW_X86_ROOT}",
-            "rhs": ""
-          }
-        ]
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/g++.exe",
-        "MHOOK_EXPECTED_ARCHITECTURE": "x86"
-      },
-      "environment": {
-        "PATH": "$env{MHOOK_MINGW_X86_ROOT}/bin;$penv{PATH}"
-      }
-    },
-    {
-      "name": "mingw-x64-debug",
-      "displayName": "MinGW x64 Debug (experimental)",
-      "inherits": "mingw",
-      "condition": {
-        "type": "allOf",
-        "conditions": [
-          {
-            "type": "equals",
-            "lhs": "${hostSystemName}",
-            "rhs": "Windows"
-          },
-          {
-            "type": "notEquals",
-            "lhs": "$env{MHOOK_MINGW_X64_ROOT}",
-            "rhs": ""
-          }
-        ]
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/g++.exe",
-        "MHOOK_EXPECTED_ARCHITECTURE": "x64"
-      },
-      "environment": {
-        "PATH": "$env{MHOOK_MINGW_X64_ROOT}/bin;$penv{PATH}"
-      }
-    },
-    {
-      "name": "mingw-x64-release",
-      "displayName": "MinGW x64 Release (experimental)",
-      "inherits": "mingw",
-      "condition": {
-        "type": "allOf",
-        "conditions": [
-          {
-            "type": "equals",
-            "lhs": "${hostSystemName}",
-            "rhs": "Windows"
-          },
-          {
-            "type": "notEquals",
-            "lhs": "$env{MHOOK_MINGW_X64_ROOT}",
-            "rhs": ""
-          }
-        ]
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/g++.exe",
-        "MHOOK_EXPECTED_ARCHITECTURE": "x64"
-      },
-      "environment": {
-        "PATH": "$env{MHOOK_MINGW_X64_ROOT}/bin;$penv{PATH}"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "msvc-x86-debug",
-      "configurePreset": "msvc-x86",
-      "configuration": "Debug"
-    },
-    {
-      "name": "mingw-x86-debug",
-      "configurePreset": "mingw-x86-debug"
-    },
-    {
-      "name": "msvc-x86-release",
-      "configurePreset": "msvc-x86",
-      "configuration": "Release"
-    },
-    {
-      "name": "mingw-x86-release",
-      "configurePreset": "mingw-x86-release"
-    },
-    {
-      "name": "msvc-x64-debug",
-      "configurePreset": "msvc-x64",
-      "configuration": "Debug"
-    },
-    {
-      "name": "mingw-x64-debug",
-      "configurePreset": "mingw-x64-debug"
-    },
-    {
-      "name": "msvc-x64-release",
-      "configurePreset": "msvc-x64",
-      "configuration": "Release"
-    },
-    {
-      "name": "mingw-x64-release",
-      "configurePreset": "mingw-x64-release"
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "msvc-x86-debug",
-      "configurePreset": "msvc-x86",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "mingw-x86-debug",
-      "configurePreset": "mingw-x86-debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "msvc-x86-release",
-      "configurePreset": "msvc-x86",
-      "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "mingw-x86-release",
-      "configurePreset": "mingw-x86-release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "msvc-x64-debug",
-      "configurePreset": "msvc-x64",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "mingw-x64-debug",
-      "configurePreset": "mingw-x64-debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "msvc-x64-release",
-      "configurePreset": "msvc-x64",
-      "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "mingw-x64-release",
-      "configurePreset": "mingw-x64-release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    }
-  ]
+    "version": 5,
+    "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "msvc-base",
+            "hidden": true,
+            "generator": "Visual Studio 17 2022",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+            "cacheVariables": {
+                "MHOOK_BUILD_TESTING": true,
+                "MHOOK_BUILD_EXAMPLES": true,
+                "MHOOK_ENABLE_SANITY_CHECKS": true
+            }
+        },
+        {
+            "name": "msvc-x64-base",
+            "hidden": true,
+            "inherits": "msvc-base",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/_build/x64"
+        },
+        {
+            "name": "msvc-x86-base",
+            "hidden": true,
+            "inherits": "msvc-base",
+            "architecture": "Win32",
+            "binaryDir": "${sourceDir}/_build/x86"
+        },
+        {
+            "name": "x64-debug-configuration",
+            "displayName": "Configure MSVC x64 Debug",
+            "inherits": "msvc-x64-base",
+            "installDir": "${sourceDir}/_install/x64/debug"
+        },
+        {
+            "name": "x64-release-configuration",
+            "displayName": "Configure MSVC x64 Release",
+            "inherits": "msvc-x64-base",
+            "installDir": "${sourceDir}/_install/x64/release"
+        },
+        {
+            "name": "x64-relwithdebinfo-configuration",
+            "displayName": "Configure MSVC x64 RelWithDebInfo",
+            "inherits": "msvc-x64-base",
+            "installDir": "${sourceDir}/_install/x64/relwithdebinfo"
+        },
+        {
+            "name": "x86-debug-configuration",
+            "displayName": "Configure MSVC x86 Debug",
+            "inherits": "msvc-x86-base",
+            "installDir": "${sourceDir}/_install/x86/debug"
+        },
+        {
+            "name": "x86-release-configuration",
+            "displayName": "Configure MSVC x86 Release",
+            "inherits": "msvc-x86-base",
+            "installDir": "${sourceDir}/_install/x86/release"
+        },
+        {
+            "name": "x86-relwithdebinfo-configuration",
+            "displayName": "Configure MSVC x86 RelWithDebInfo",
+            "inherits": "msvc-x86-base",
+            "installDir": "${sourceDir}/_install/x86/relwithdebinfo"
+        },
+        {
+            "name": "mingw-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "cacheVariables": {
+                "MHOOK_BUILD_TESTING": true,
+                "MHOOK_BUILD_EXAMPLES": true,
+                "MHOOK_ENABLE_SANITY_CHECKS": true
+            }
+        },
+        {
+            "name": "mingw-x64-base",
+            "hidden": true,
+            "inherits": "mingw-base",
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+                    { "type": "notEquals", "lhs": "$env{MHOOK_MINGW_X64_ROOT}", "rhs": "" }
+                ]
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X64_ROOT}/bin/g++.exe",
+                "MHOOK_EXPECTED_ARCHITECTURE": "x64"
+            },
+            "environment": { "PATH": "$env{MHOOK_MINGW_X64_ROOT}/bin;$penv{PATH}" }
+        },
+        {
+            "name": "mingw-x86-base",
+            "hidden": true,
+            "inherits": "mingw-base",
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+                    { "type": "notEquals", "lhs": "$env{MHOOK_MINGW_X86_ROOT}", "rhs": "" }
+                ]
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/gcc.exe",
+                "CMAKE_CXX_COMPILER": "$env{MHOOK_MINGW_X86_ROOT}/bin/g++.exe",
+                "MHOOK_EXPECTED_ARCHITECTURE": "x86"
+            },
+            "environment": { "PATH": "$env{MHOOK_MINGW_X86_ROOT}/bin;$penv{PATH}" }
+        },
+        {
+            "name": "mingw-x64-debug-configuration",
+            "displayName": "Configure MinGW x64 Debug",
+            "inherits": "mingw-x64-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x64/debug",
+            "installDir": "${sourceDir}/_install/mingw-x64/debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "mingw-x64-release-configuration",
+            "displayName": "Configure MinGW x64 Release",
+            "inherits": "mingw-x64-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x64/release",
+            "installDir": "${sourceDir}/_install/mingw-x64/release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "mingw-x64-relwithdebinfo-configuration",
+            "displayName": "Configure MinGW x64 RelWithDebInfo",
+            "inherits": "mingw-x64-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x64/relwithdebinfo",
+            "installDir": "${sourceDir}/_install/mingw-x64/relwithdebinfo",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "mingw-x86-debug-configuration",
+            "displayName": "Configure MinGW x86 Debug",
+            "inherits": "mingw-x86-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x86/debug",
+            "installDir": "${sourceDir}/_install/mingw-x86/debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "mingw-x86-release-configuration",
+            "displayName": "Configure MinGW x86 Release",
+            "inherits": "mingw-x86-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x86/release",
+            "installDir": "${sourceDir}/_install/mingw-x86/release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "mingw-x86-relwithdebinfo-configuration",
+            "displayName": "Configure MinGW x86 RelWithDebInfo",
+            "inherits": "mingw-x86-base",
+            "binaryDir": "${sourceDir}/_build/mingw-x86/relwithdebinfo",
+            "installDir": "${sourceDir}/_install/mingw-x86/relwithdebinfo",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "x64-debug-build", "configurePreset": "x64-debug-configuration", "configuration": "Debug" },
+        { "name": "x64-release-build", "configurePreset": "x64-release-configuration", "configuration": "Release" },
+        { "name": "x64-relwithdebinfo-build", "configurePreset": "x64-relwithdebinfo-configuration", "configuration": "RelWithDebInfo" },
+        { "name": "x86-debug-build", "configurePreset": "x86-debug-configuration", "configuration": "Debug" },
+        { "name": "x86-release-build", "configurePreset": "x86-release-configuration", "configuration": "Release" },
+        { "name": "x86-relwithdebinfo-build", "configurePreset": "x86-relwithdebinfo-configuration", "configuration": "RelWithDebInfo" },
+        { "name": "mingw-x64-debug-build", "configurePreset": "mingw-x64-debug-configuration" },
+        { "name": "mingw-x64-release-build", "configurePreset": "mingw-x64-release-configuration" },
+        { "name": "mingw-x64-relwithdebinfo-build", "configurePreset": "mingw-x64-relwithdebinfo-configuration" },
+        { "name": "mingw-x86-debug-build", "configurePreset": "mingw-x86-debug-configuration" },
+        { "name": "mingw-x86-release-build", "configurePreset": "mingw-x86-release-configuration" },
+        { "name": "mingw-x86-relwithdebinfo-build", "configurePreset": "mingw-x86-relwithdebinfo-configuration" }
+    ],
+    "testPresets": [
+        { "name": "common-test", "hidden": true, "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+        { "name": "x64-debug-test", "inherits": "common-test", "configurePreset": "x64-debug-configuration", "configuration": "Debug" },
+        { "name": "x64-release-test", "inherits": "common-test", "configurePreset": "x64-release-configuration", "configuration": "Release" },
+        { "name": "x64-relwithdebinfo-test", "inherits": "common-test", "configurePreset": "x64-relwithdebinfo-configuration", "configuration": "RelWithDebInfo" },
+        { "name": "x86-debug-test", "inherits": "common-test", "configurePreset": "x86-debug-configuration", "configuration": "Debug" },
+        { "name": "x86-release-test", "inherits": "common-test", "configurePreset": "x86-release-configuration", "configuration": "Release" },
+        { "name": "x86-relwithdebinfo-test", "inherits": "common-test", "configurePreset": "x86-relwithdebinfo-configuration", "configuration": "RelWithDebInfo" },
+        { "name": "mingw-x64-debug-test", "inherits": "common-test", "configurePreset": "mingw-x64-debug-configuration" },
+        { "name": "mingw-x64-release-test", "inherits": "common-test", "configurePreset": "mingw-x64-release-configuration" },
+        { "name": "mingw-x64-relwithdebinfo-test", "inherits": "common-test", "configurePreset": "mingw-x64-relwithdebinfo-configuration" },
+        { "name": "mingw-x86-debug-test", "inherits": "common-test", "configurePreset": "mingw-x86-debug-configuration" },
+        { "name": "mingw-x86-release-test", "inherits": "common-test", "configurePreset": "mingw-x86-release-configuration" },
+        { "name": "mingw-x86-relwithdebinfo-test", "inherits": "common-test", "configurePreset": "mingw-x86-relwithdebinfo-configuration" }
+    ]
 }
