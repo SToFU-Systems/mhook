@@ -1,0 +1,25 @@
+PROJECT_NAME           = "Mhook"
+PROJECT_BRIEF          = "Windows inline function hooking library"
+
+# Public interface only. Documenting the implementation would turn internal
+# detail into an unspoken contract.
+INPUT                  = ../src/mhook-lib/include/mhook-lib
+FILE_PATTERNS          = *.h
+RECURSIVE              = NO
+
+# Breathe consumes XML; Doxygen's own HTML is not used.
+GENERATE_XML           = YES
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+XML_OUTPUT             = ../_docs/doxygen/xml
+
+# Graphviz is not a dependency: call graphs add little for six functions.
+HAVE_DOT               = NO
+
+EXTRACT_ALL            = NO
+WARN_IF_UNDOCUMENTED   = YES
+WARN_AS_ERROR          = YES
+QUIET                  = YES
+
+OPTIMIZE_OUTPUT_FOR_C  = YES
+MACRO_EXPANSION        = YES
