@@ -194,7 +194,7 @@ int wmain(int argc, WCHAR* argv[])
     HANDLE hProc = NULL;
 
     // Set the hook
-    if (Mhook_SetHook((PVOID*)&TrueNtOpenProcess, HookNtOpenProcess))
+    if (Mhook_SetHook((PVOID*)&TrueNtOpenProcess, reinterpret_cast<PVOID>(HookNtOpenProcess)))
     {
         // Now call OpenProcess and observe NtOpenProcess being redirected
         // under the hood.
@@ -231,7 +231,7 @@ int wmain(int argc, WCHAR* argv[])
     // extra work under the hood to make things work properly. This really
     // is more of a test case rather than a demo.)
     printf("Testing SelectObject.\n");
-    if (Mhook_SetHook((PVOID*)&TrueSelectObject, HookSelectobject))
+    if (Mhook_SetHook((PVOID*)&TrueSelectObject, reinterpret_cast<PVOID>(HookSelectobject)))
     {
         // error checking omitted for brevity. doesn't matter much
         // in this context anyway.
@@ -248,13 +248,13 @@ int wmain(int argc, WCHAR* argv[])
     }
 
     printf("Testing getaddrinfo.\n");
-    if (Mhook_SetHook((PVOID*)&Truegetaddrinfo, Hookgetaddrinfo))
+    if (Mhook_SetHook((PVOID*)&Truegetaddrinfo, reinterpret_cast<PVOID>(Hookgetaddrinfo)))
     {
         // error checking omitted for brevity. doesn't matter much
         // in this context anyway.
         WSADATA wd = {0};
         WSAStartup(MAKEWORD(2, 2), &wd);
-        char* ip = "localhost";
+        const char* ip = "localhost";
         struct addrinfo aiHints;
         struct addrinfo* res = NULL;
         memset(&aiHints, 0, sizeof(aiHints));
@@ -280,7 +280,7 @@ int wmain(int argc, WCHAR* argv[])
     }
 
     printf("Testing HeapAlloc.\n");
-    if (Mhook_SetHook((PVOID*)&TrueHeapAlloc, HookHeapAlloc))
+    if (Mhook_SetHook((PVOID*)&TrueHeapAlloc, reinterpret_cast<PVOID>(HookHeapAlloc)))
     {
         free(malloc(10));
         // Remove the hook
@@ -288,7 +288,7 @@ int wmain(int argc, WCHAR* argv[])
     }
 
     printf("Testing NtClose.\n");
-    if (Mhook_SetHook((PVOID*)&TrueNtClose, HookNtClose))
+    if (Mhook_SetHook((PVOID*)&TrueNtClose, reinterpret_cast<PVOID>(HookNtClose)))
     {
         CloseHandle(NULL);
         // Remove the hook
