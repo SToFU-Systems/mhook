@@ -30,5 +30,16 @@ _ReSharper*/
 .vs/
 
 # CMake
-/build/
 /CMakeUserPresets.json
+
+# Build, install, package and documentation output
+/_build/
+/_install/
+/_package/
+/_docs/
+
+# Created on demand by scripts/setup.py --docs
+/.venv/
+
+# Design documents, never committed
+/docs/superpowers/

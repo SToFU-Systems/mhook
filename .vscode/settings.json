@@ -1,0 +1,10 @@
+{
+    "cmake.buildArgs": [
+        "-j"
+    ],
+    "cmake.saveBeforeBuild": true,
+    "cmake.useCMakePresets": "always",
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmakeExplorer.suiteDelimiter": "::",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+}

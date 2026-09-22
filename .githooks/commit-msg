@@ -1,0 +1,8 @@
+#!/bin/sh
+# Enforce the commit message convention: <emoji> [scope] Subject
+#
+# Routed through setup.bat rather than calling the script directly, so the hook
+# inherits its checks: setup.bat verifies Python is on PATH and provisions the
+# virtual environment before anything runs. Git runs hooks from the top of the
+# working tree, so the relative path resolves.
+exec ./setup.bat --check-commit-msg "$1"
