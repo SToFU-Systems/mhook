@@ -761,6 +761,14 @@ typedef enum _ARCHITECTURE_TYPE
 
 } ARCHITECTURE_TYPE;
 
+// Both structures are defined further down, but the function-pointer types
+// below mention them first. Without these declarations at file scope, C treats
+// a tag first seen inside a parameter list as a new type local to that
+// prototype, and the resulting pointers are then incompatible with the real
+// ones. MSVC lets it pass; GCC does not.
+struct _INSTRUCTION;
+struct _ARCHITECTURE_FORMAT;
+
 /** Architecture-specific one-time setup for an INSTRUCTION before it is decoded. */
 typedef BOOL (*INIT_INSTRUCTION)(struct _INSTRUCTION* Instruction);
 /** Architecture-specific textual dump of a decoded INSTRUCTION. */
