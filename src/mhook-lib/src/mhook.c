@@ -218,7 +218,17 @@ static BOOL g_bVarsInitialized = FALSE;
 static CRITICAL_SECTION g_cs;
 static MHOOKS_TRAMPOLINE* g_pHooks = NULL;
 static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
-static __declspec(thread) MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
+// GCC ignores __declspec(thread) and says so only in a warning, which would
+// have left this status shared between threads under MinGW while the public
+// contract promises it is per thread. C11's _Thread_local is not available at
+// C99, so each compiler gets the spelling it understands.
+#if defined(_MSC_VER)
+#define MHOOK_THREAD_LOCAL __declspec(thread)
+#else
+#define MHOOK_THREAD_LOCAL __thread
+#endif
+
+static MHOOK_THREAD_LOCAL MHOOK_STATUS g_lastStatus = MHOOK_STATUS_SUCCESS;
 
 #define MHOOK_JMPSIZE 5
 #define MHOOK_MINALLOCSIZE 4096
