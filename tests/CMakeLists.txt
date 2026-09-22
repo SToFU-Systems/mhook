@@ -153,6 +153,13 @@ endif()
 # sized for. Setting MHOOK_TEST_EXHAUSTIVE in the environment runs them in full
 # instead, which takes roughly twenty minutes per configuration, so keep that
 # for a nightly job rather than a pull request.
-set_tests_properties(mhook.hook.threads PROPERTIES TIMEOUT 120)
+# mhook.hook.threads is the exception among these. Its cost is not the work it
+# performs but how often a spinning worker happens to be inside the patch range
+# when the engine suspends it, because each collision costs another snapshot
+# and another retry. That is a property of the host's scheduler, not of the
+# code: the case runs in about 12 seconds here, about 40 when pinned to a
+# single core, and exceeded 120 on a CI runner. Its timeout is therefore sized
+# to catch a hang rather than to hold a performance budget.
+set_tests_properties(mhook.hook.threads PROPERTIES TIMEOUT 600)
 set_tests_properties(mhook.hook.reuse PROPERTIES TIMEOUT 180)
 set_tests_properties(mhook.hook.sweep PROPERTIES TIMEOUT 300)
