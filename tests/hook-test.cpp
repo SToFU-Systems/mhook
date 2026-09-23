@@ -423,12 +423,12 @@ static int CaseThunk(void)
     const SIZE_T kTargetOffset = 384;
     const SIZE_T kNearJumpSize = 5;
     const SIZE_T kShortJumpSize = 2;
-    const SIZE_T kIndirectJumpSize = 6;
     const SIZE_T kSnapshotSize = kThunkCount * kThunkStride;
 #ifdef _M_IX86
     const SIZE_T kDirectThunkCount = 15;
 #elif defined _M_X64
     const SIZE_T kDirectThunkCount = 14;
+    const SIZE_T kIndirectJumpSize = 6;
     const SIZE_T kSecondPointerSlotOffset = 336;
     const SIZE_T kRexIndirectJumpSize = 7;
 #else // !_M_IX86 && !_M_X64
@@ -1110,7 +1110,7 @@ static int CaseThreads(void)
             InterlockedExchange(&g_stopThreads, 1);
             if (i > 0)
             {
-                WaitForMultipleObjects(i, threads, TRUE, INFINITE);
+                WaitForMultipleObjects((DWORD)i, threads, TRUE, INFINITE);
                 for (int j = 0; j < i; ++j)
                     CloseHandle(threads[j]);
             }
