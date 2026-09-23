@@ -46,11 +46,6 @@ extern "C"
     (((ULONG_PTR)(x) == (ULONG_PTR)(s) && (ULONG_PTR)(x) == (ULONG_PTR)(e)) ||                                         \
      ((ULONG_PTR)(x) >= (ULONG_PTR)(s) && (ULONG_PTR)(x) < (ULONG_PTR)(e)))
 
-#if _MSC_VER >= 1400
-/** Silences MSVC's deprecated-CRT-function warning (C4996) for the calls below. */
-#pragma warning(disable : 4996)
-#endif
-
 #if defined(_WIN64)
 /** Highest address IS_VALID_ADDRESS() accepts; Win64 specific. */
 #define VALID_ADDRESS_MAX 0x7FFEFFFFFFFFFFFF // Win64 specific

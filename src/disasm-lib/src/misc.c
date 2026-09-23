@@ -105,7 +105,7 @@ BYTE* HexToBinary(char* Input, DWORD InputLength, DWORD* OutputLength)
             if (i >= InputLength)
                 break;
 
-            if (!IsHexChar(Input[i]))
+            if (!IsHexChar((BYTE)Input[i]))
             {
                 // fprintf(stderr, "ERROR: invalid hex character at offset %lu (0x%04x)\n", i, i);
                 goto abort;
@@ -162,7 +162,7 @@ BYTE* HexToBinary(char* Input, DWORD InputLength, DWORD* OutputLength)
             }
             i += 2;
 
-            if (!IsHexChar(Input[i]))
+            if (!IsHexChar((BYTE)Input[i]))
             {
                 // fprintf(stderr, "ERROR: invalid hex character at offset %lu (0x%04x)\n", i, i);
                 goto abort;
@@ -203,7 +203,7 @@ BYTE* HexToBinary(char* Input, DWORD InputLength, DWORD* OutputLength)
     {
         for (i = 0; i < InputLength; i += 2)
         {
-            if (!IsHexChar(Input[i]))
+            if (!IsHexChar((BYTE)Input[i]))
             {
                 // fprintf(stderr, "ERROR: invalid hex character at offset %lu (0x%04x)\n", i, i);
                 goto abort;

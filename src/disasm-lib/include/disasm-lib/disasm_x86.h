@@ -328,25 +328,25 @@ extern "C"
  */
 
 /** Implicit AL. */
-#define OPTYPE_REG_AL OP_REG + 0x01
+#define OPTYPE_REG_AL (OP_REG + 0x01)
 
 /** Implicit CL. */
-#define OPTYPE_REG_CL OP_REG + 0x02
+#define OPTYPE_REG_CL (OP_REG + 0x02)
 
 /** Implicit AH. */
-#define OPTYPE_REG_AH OP_REG + 0x03
+#define OPTYPE_REG_AH (OP_REG + 0x03)
 
 /** Implicit AX. */
-#define OPTYPE_REG_AX OP_REG + 0x04
+#define OPTYPE_REG_AX (OP_REG + 0x04)
 
 /** Implicit DX. */
-#define OPTYPE_REG_DX OP_REG + 0x05
+#define OPTYPE_REG_DX (OP_REG + 0x05)
 
 /** Implicit ECX. */
-#define OPTYPE_REG_ECX OP_REG + 0x06
+#define OPTYPE_REG_ECX (OP_REG + 0x06)
 
 /** An 8-bit register whose index is encoded in the low bits of the opcode byte itself. */
-#define OPTYPE_REG8 OP_REG + 0x07
+#define OPTYPE_REG8 (OP_REG + 0x07)
 
 /**
  * The address-size-dependent base pointer register.
@@ -354,7 +354,7 @@ extern "C"
  * If address size is 4, use EBP
  * If address size is 8, use RBP
  */
-#define OPTYPE_REG_xBP OP_REG + 0x08
+#define OPTYPE_REG_xBP (OP_REG + 0x08)
 
 /**
  * The address-size-dependent stack pointer register.
@@ -362,7 +362,7 @@ extern "C"
  * If address size is 4, use EBP
  * If address size is 8, use RBP
  */
-#define OPTYPE_REG_xSP OP_REG + 0x09
+#define OPTYPE_REG_xSP (OP_REG + 0x09)
 
 /**
  * The operand-size-dependent accumulator register, one size class down.
@@ -370,7 +370,7 @@ extern "C"
  * If operand size is 4, take 16-bit register
  * If operand size is 8, take 32-bit register
  */
-#define OPTYPE_REG_xAX_SMALL OP_REG + 0x0a
+#define OPTYPE_REG_xAX_SMALL (OP_REG + 0x0a)
 
 /**
  * The operand-size-dependent accumulator register.
@@ -378,7 +378,7 @@ extern "C"
  * If operand size is 4, take 32-bit register
  * If operand size is 8, take 64-bit register
  */
-#define OPTYPE_REG_xAX_BIG OP_REG + 0x0b
+#define OPTYPE_REG_xAX_BIG (OP_REG + 0x0b)
 
 /** @} */
 
@@ -1426,6 +1426,13 @@ typedef struct _X86_OPCODE
     U32 ResultsIfFalse;
 } X86_OPCODE;
 
+// C4201: the Segment/Selector union below is anonymous. That is standard C11
+// and C++, and GCC accepts it in gnu99, but MSVC's C front end still reports it
+// as an extension.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4201)
+#endif
 /** @brief x86/AMD64-specific decode state and addressing details for one instruction. */
 typedef struct _X86_INSTRUCTION
 {
@@ -1524,6 +1531,9 @@ typedef struct _X86_INSTRUCTION
     S64 Displacement;
 
 } X86_INSTRUCTION;
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////
 // Exported functions
