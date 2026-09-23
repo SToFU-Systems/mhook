@@ -89,15 +89,17 @@ typedef ULONG(WINAPI* _NtClose)(IN HANDLE Handle);
 //=========================================================================
 // Get the current (original) address to the functions to be hooked
 //
-_NtOpenProcess TrueNtOpenProcess = (_NtOpenProcess)GetProcAddress(GetModuleHandle(L"ntdll"), "NtOpenProcess");
+_NtOpenProcess TrueNtOpenProcess =
+    (_NtOpenProcess)(void (*)(void))GetProcAddress(GetModuleHandle(L"ntdll"), "NtOpenProcess");
 
-_SelectObject TrueSelectObject = (_SelectObject)GetProcAddress(GetModuleHandle(L"gdi32"), "SelectObject");
+_SelectObject TrueSelectObject =
+    (_SelectObject)(void (*)(void))GetProcAddress(GetModuleHandle(L"gdi32"), "SelectObject");
 
-_getaddrinfo Truegetaddrinfo = (_getaddrinfo)GetProcAddress(GetModuleHandle(L"ws2_32"), "getaddrinfo");
+_getaddrinfo Truegetaddrinfo = (_getaddrinfo)(void (*)(void))GetProcAddress(GetModuleHandle(L"ws2_32"), "getaddrinfo");
 
-_HeapAlloc TrueHeapAlloc = (_HeapAlloc)GetProcAddress(GetModuleHandle(L"kernel32"), "HeapAlloc");
+_HeapAlloc TrueHeapAlloc = (_HeapAlloc)(void (*)(void))GetProcAddress(GetModuleHandle(L"kernel32"), "HeapAlloc");
 
-_NtClose TrueNtClose = (_NtClose)GetProcAddress(GetModuleHandle(L"ntdll"), "NtClose");
+_NtClose TrueNtClose = (_NtClose)(void (*)(void))GetProcAddress(GetModuleHandle(L"ntdll"), "NtClose");
 
 //=========================================================================
 // This is the function that will replace NtOpenProcess once the hook
@@ -110,7 +112,7 @@ ULONG WINAPI HookNtOpenProcess(
     IN PCLIENT_ID ClientId
 )
 {
-    printf("***** Call to open process %d\n", ClientId->UniqueProcess);
+    printf("***** Call to open process %lu\n", (unsigned long)ClientId->UniqueProcess);
     return TrueNtOpenProcess(ProcessHandle, AccessMask, ObjectAttributes, ClientId);
 }
 
@@ -120,7 +122,7 @@ ULONG WINAPI HookNtOpenProcess(
 //
 HGDIOBJ WINAPI HookSelectobject(HDC hdc, HGDIOBJ hgdiobj)
 {
-    printf("***** Call to SelectObject(0x%p, 0x%p)\n", hdc, hgdiobj);
+    printf("***** Call to SelectObject(0x%p, 0x%p)\n", static_cast<void*>(hdc), hgdiobj);
     return TrueSelectObject(hdc, hgdiobj);
 }
 
@@ -131,7 +133,13 @@ HGDIOBJ WINAPI HookSelectobject(HDC hdc, HGDIOBJ hgdiobj)
 int WSAAPI
 Hookgetaddrinfo(const char* nodename, const char* servname, const struct addrinfo* hints, struct addrinfo** res)
 {
-    printf("***** Call to getaddrinfo(0x%p, 0x%p, 0x%p, 0x%p)\n", nodename, servname, hints, res);
+    printf(
+        "***** Call to getaddrinfo(0x%p, 0x%p, 0x%p, 0x%p)\n",
+        nodename,
+        servname,
+        static_cast<const void*>(hints),
+        static_cast<void*>(res)
+    );
     return Truegetaddrinfo(nodename, servname, hints, res);
 }
 
@@ -141,7 +149,7 @@ Hookgetaddrinfo(const char* nodename, const char* servname, const struct addrinf
 //
 LPVOID WINAPI HookHeapAlloc(HANDLE a_Handle, DWORD a_Bla, SIZE_T a_Bla2)
 {
-    printf("***** Call to HeapAlloc(0x%p, %u, 0x%p)\n", a_Handle, a_Bla, a_Bla2);
+    printf("***** Call to HeapAlloc(0x%p, %lu, %zu)\n", a_Handle, a_Bla, (size_t)a_Bla2);
     return TrueHeapAlloc(a_Handle, a_Bla, a_Bla2);
 }
 
@@ -182,14 +190,14 @@ static void UnhookAndReport(PVOID* ppHookedFunction, const char* pszName)
     }
     else
     {
-        printf("Could not unhook %s: error %d\n", pszName, dwError);
+        printf("Could not unhook %s: error %lu\n", pszName, dwError);
     }
 }
 
 //=========================================================================
 // This is where the work gets done.
 //
-int wmain(int argc, WCHAR* argv[])
+int wmain(int, WCHAR*[])
 {
     HANDLE hProc = NULL;
 
@@ -206,7 +214,7 @@ int wmain(int argc, WCHAR* argv[])
         }
         else
         {
-            printf("Could not open self: %d\n", GetLastError());
+            printf("Could not open self: %lu\n", GetLastError());
         }
         // Remove the hook
         UnhookAndReport((PVOID*)&TrueNtOpenProcess, "NtOpenProcess");
@@ -222,7 +230,7 @@ int wmain(int argc, WCHAR* argv[])
     }
     else
     {
-        printf("Could not open self: %d\n", GetLastError());
+        printf("Could not open self: %lu\n", GetLastError());
     }
 
     // Test another hook, this time in SelectObject
@@ -252,7 +260,7 @@ int wmain(int argc, WCHAR* argv[])
     {
         // error checking omitted for brevity. doesn't matter much
         // in this context anyway.
-        WSADATA wd = {0};
+        WSADATA wd = {};
         WSAStartup(MAKEWORD(2, 2), &wd);
         const char* ip = "localhost";
         struct addrinfo aiHints;
