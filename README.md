@@ -209,7 +209,7 @@ for the whole project is not allowed.
 
 | Version | Date | Highlights |
 | --- | --- | --- |
-| 3.0.0 | 2026-09-22 | Template layout, C99, versioned package, generated docs. |
+| Unreleased (3.0.0) | Not yet released | Template layout, C99, versioned package, generated docs, warning-clean build. |
 | [Original 2.4](https://github.com/martona/mhook/tree/v2.4) | 2014-03-05 | Last original release. |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
