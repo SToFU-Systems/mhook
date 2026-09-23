@@ -77,6 +77,31 @@ static bool CheckSnapshotVirtualAddress(void)
     return valid;
 }
 
+/**
+ * @brief Verifies that a general register encoded in ModRM.rm is decoded as that register.
+ * @return True when "mov ebx, cr0" names EBX as its destination.
+ */
+static bool CheckModRmRegisterOperand(void)
+{
+    U8 bytes[32] = {0x0F, 0x20, 0xC3}; // mov ebx, cr0
+    DISASSEMBLER decoder = {};
+    if (!InitDisassembler(&decoder, ARCH_X86))
+    {
+        fprintf(stderr, "Decoder initialization failed for register operand test\n");
+        return false;
+    }
+
+    INSTRUCTION* instruction =
+        GetInstruction(&decoder, (U64)(ULONG_PTR)bytes, bytes, DISASM_DECODE | DISASM_SUPPRESSERRORS);
+    const bool valid = instruction && !instruction->ErrorOccurred && instruction->Length == 3 &&
+                       (instruction->Operands[0].Flags & OP_REG) && instruction->Operands[0].Register == X86_REG_EBX;
+    if (!valid)
+        fprintf(stderr, "ModRM.rm register operand was not decoded as EBX\n");
+
+    CloseDisassembler(&decoder);
+    return valid;
+}
+
 int main()
 {
     if (!set_hook || !remove_hook)
@@ -97,7 +122,7 @@ int main()
             return 1;
         }
     }
-    if (!CheckSnapshotVirtualAddress())
+    if (!CheckSnapshotVirtualAddress() || !CheckModRmRegisterOperand())
         return 1;
     puts("Archive linkage and x86/x64 decoder checks passed.");
     return 0;
