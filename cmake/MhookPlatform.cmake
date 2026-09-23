@@ -60,11 +60,23 @@ if(DEFINED MHOOK_EXPECTED_ARCHITECTURE
         "Requested ${MHOOK_EXPECTED_ARCHITECTURE}, but the compiler targets ${MHOOK_ARCHITECTURE}.")
 endif()
 
+# The warning baseline every mhook target builds against. README.md, section
+# "Compiler warnings", explains the choice and lists the allowed suppressions.
+# Whether a warning fails the build is not decided here: the presets set
+# CMAKE_COMPILE_WARNING_AS_ERROR, so CI and preset builds enforce the baseline
+# while a project that vendors mhook is never broken by a newer compiler.
+function(mhook_enable_warnings target)
+    if(MHOOK_COMPILER_MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion)
+    endif()
+endfunction()
+
 function(mhook_configure_private_target target)
     target_compile_definitions(${target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
-    if(MHOOK_COMPILER_MSVC)
-        target_compile_options(${target} PRIVATE /W3)
-    elseif(MHOOK_COMPILER_MINGW)
+    mhook_enable_warnings(${target})
+    if(MHOOK_COMPILER_MINGW)
         if(MHOOK_ARCHITECTURE STREQUAL "x64")
             target_compile_definitions(${target} PRIVATE _M_X64)
         else()
