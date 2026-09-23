@@ -25,22 +25,22 @@
 #define X86_GET_REG(val) ((val) & 7)
 #define X86_GET_REG64(val) ((GET_REX_B(X86Instruction->rex_b) << 3) | ((val) & 7))
 
-#define GET_MODRM_MOD(a) (((a) >> 6) & 3) // bits 6, 7
-#define GET_MODRM_REG(a) (((a) >> 3) & 7) // bits 3, 4, 5
-#define GET_MODRM_EXT(a) (((a) >> 3) & 7) // bits 3, 4, 5
-#define GET_MODRM_RM(a) ((a) & 7)         // bits 0, 1, 2
+#define GET_MODRM_MOD(a) (((unsigned)(a) >> 6) & 3u) // bits 6, 7
+#define GET_MODRM_REG(a) (((unsigned)(a) >> 3) & 7u) // bits 3, 4, 5
+#define GET_MODRM_EXT(a) (((unsigned)(a) >> 3) & 7u) // bits 3, 4, 5
+#define GET_MODRM_RM(a) ((unsigned)(a) & 7u)         // bits 0, 1, 2
 
-#define GET_SIB_SCALE(a) (((a) >> 6) & 3) // bits 6, 7
-#define GET_SIB_INDEX(a) (((a) >> 3) & 7) // bits 3, 4, 5
-#define GET_SIB_BASE(a) ((a) & 7)         // bits 0, 1, 2
+#define GET_SIB_SCALE(a) (((unsigned)(a) >> 6) & 3u) // bits 6, 7
+#define GET_SIB_INDEX(a) (((unsigned)(a) >> 3) & 7u) // bits 3, 4, 5
+#define GET_SIB_BASE(a) ((unsigned)(a) & 7u)         // bits 0, 1, 2
 
 #define REX_PREFIX_START 0x40
 #define REX_PREFIX_END 0x4F
-#define GET_REX_W(r) (((r) & 8) >> 3)  // bit 3
-#define GET_REX_R(r) (((r) & 4) >> 2)  // bit 2
-#define GET_REX_X(r) (((r) & 2) >> 1)  // bit 1
-#define GET_REX_B(r) ((r) & 1)         // bit 0
-#define REX_MASK(n) ((n >> 16) & 0x0F) // bits 0-3
+#define GET_REX_W(r) (((unsigned)(r) >> 3) & 1u) // bit 3
+#define GET_REX_R(r) (((unsigned)(r) >> 2) & 1u) // bit 2
+#define GET_REX_X(r) (((unsigned)(r) >> 1) & 1u) // bit 1
+#define GET_REX_B(r) ((unsigned)(r) & 1u)        // bit 0
+#define REX_MASK(n) ((n >> 16) & 0x0F)           // bits 0-3
 
 // Groupings to make the opcode table more readible
 #define NOARGS {0, 0, 0}
@@ -149,41 +149,7 @@
 /////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////
 
-static char* Addressing16[8] = {"bx+si", "bx+di", "bp+si", "bp+di", "si", "di", "bp", "bx"};
-static char* MMX_Registers[8] = {"mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7"};
-static char* SSE_Registers[8] = {"xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"};
-static char* DR_Registers[8] = {"dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7"};
-static char* CR_Registers[8] = {"cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cr6", "cr7"};
-static char* TR_Registers[8] = {"tr0", "tr1", "tr2", "tr3", "tr4", "tr5", "tr6", "tr7"};
-static char* FPU_Registers[8] = {"st(0)", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"};
 static char* Segments[8] = {"es", "cs", "ss", "ds", "fs", "gs", "ERROR", "ERROR"};
-static char* Registers8[8] = {"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"};
-static char* Registers16[8] = {"ax", "cx", "dx", "bx", "sp", "bp", "si", "di"};
-static char* Registers32[8] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
-static char* REX_Registers8[16] =
-    {"al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"};
-static char* REX_Registers16[16] =
-    {"ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"};
-static char* REX_Registers32[16] = {
-    "eax",
-    "ecx",
-    "edx",
-    "ebx",
-    "esp",
-    "ebp",
-    "esi",
-    "edi",
-    "r8d",
-    "r9d",
-    "r10d",
-    "r11d",
-    "r12d",
-    "r13d",
-    "r14d",
-    "r15d"
-};
-static char* REX_Registers64[16] =
-    {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
 static char* DataSizes[8 + 1] = {
     "byte ptr",
     "word ptr",
@@ -2022,7 +1988,15 @@ X86_OPCODE X86_Opcodes_1[0x100] = // 1 byte opcodes
         {PREFIX},                                                                              /* 0xF2 */
         {PREFIX},                                                                              /* 0xF3 */
         {NOGROUP, CPU_I386, ITYPE_HALT, "hlt", NOARGS, NOCOND, NOCHANGE, NOACTION, IGNORED},   /* 0xF4 */
-        {NOGROUP, CPU_I386, ITYPE_TOGCF, "cmc", {OPTYPE_FLAGS | OP_DST, 0, 0}, NOCOND, FLAG_CF_TOG, IGNORED}, /* 0xF5 */
+        {NOGROUP,
+         CPU_I386,
+         ITYPE_TOGCF,
+         "cmc",
+         {OPTYPE_FLAGS | OP_DST, 0, 0},
+         NOCOND,
+         FLAG_CF_TOG,
+         NOACTION,
+         IGNORED},               /* 0xF5 */
         {X86_Group_3_F6, GROUP}, /* 0xF6 Eb */
         {X86_Group_3_F7, GROUP}, /* 0xF7 Ev */
         {NOGROUP,

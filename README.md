@@ -161,11 +161,55 @@ not touch your project's packaging. Its tests are gated on
 in your own project does not drag them into your build; pass
 `-DMHOOK_BUILD_TESTING=ON` if you do want them.
 
+### Compiler warnings
+
+Every mhook target builds against one warning baseline, set by
+`mhook_enable_warnings` in `cmake/MhookPlatform.cmake`:
+
+| Compiler | Flags |
+| --- | --- |
+| MSVC | `/W4` |
+| MinGW GCC | `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` |
+
+The presets set `CMAKE_COMPILE_WARNING_AS_ERROR`, so any build through a
+preset, `setup.bat` or CI fails on a new warning. The consumer tests fail on a
+warning even outside the presets, because they exist to prove that the public
+header compiles cleanly. A project that vendors mhook keeps its own policy: it
+gets the warnings, never the errors, so a newer compiler cannot break its
+build. To look past a warning locally, configure with
+`--compile-no-warning-as-error`.
+
+`/W4` rather than `/Wall`: `/Wall` mostly reports padding, inlining and
+Windows SDK header noise.
+
+GCC's `-Wconversion` and `-Wsign-conversion` are stricter than anything in
+MSVC's `/W4`, so a change that is clean under MSVC can still fail the MinGW CI
+jobs. Two patterns keep them quiet without hiding anything:
+
+- A value stored in a narrow bit-field is computed in `unsigned` arithmetic
+  with the mask applied last, as in `((unsigned)(a) >> 6) & 3u`. GCC only
+  accepts that the result fits when the mask is the outermost operation on an
+  unsigned value; a `(U8)` cast or a mask on a promoted `int` still warns.
+- Arithmetic that is meant to wrap, such as adding a signed displacement to an
+  unsigned address, converts the signed operand explicitly, so the wrap is
+  visibly intended.
+
+Fix a warning rather than suppress it. When a warning cannot be fixed without
+making the code worse, suppress it locally with `#pragma warning(push)` and
+`pop` around the smallest possible region, add a comment saying why, and add
+the suppression to this table. Suppressing a warning for a whole target or
+for the whole project is not allowed.
+
+| Warning | Where | Why |
+| --- | --- | --- |
+| C4201 | `INSTRUCTION_OPERAND` in `disasm.h`, `X86_INSTRUCTION` in `disasm_x86.h` | The anonymous unions are standard C11 and C++, and GCC accepts them in gnu99. Only MSVC's C front end calls them an extension. Naming them would change every user of the fields. |
+| C4324 | `INSTRUCTION_OPERAND` in `disasm.h` | The padding it reports is exactly what the 16-byte alignment of `U128` asks for. |
+
 ## Version History
 
 | Version | Date | Highlights |
 | --- | --- | --- |
-| 3.0.0 | 2026-09-22 | Template layout, C99, versioned package, generated docs. |
+| Unreleased (3.0.0) | Not yet released | Template layout, C99, versioned package, generated docs, warning-clean build. |
 | [Original 2.4](https://github.com/martona/mhook/tree/v2.4) | 2014-03-05 | Last original release. |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed changes.

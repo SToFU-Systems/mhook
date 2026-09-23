@@ -88,10 +88,6 @@
 #ifdef _DEBUG
 #define ODPRINTF(a) odprintfW a
 #define ODPRINTFA(a) odprintfA a
-#else
-#define ODPRINTF(a)
-#define ODPRINTFA(a)
-#endif
 
 /**
  * @brief Formats a message and sends it to the debugger via OutputDebugStringA.
@@ -154,6 +150,12 @@ static void __cdecl odprintfW(PCWSTR format, ...)
         va_end(args);
     }
 }
+
+#else
+// A statement rather than nothing, so "if (x) ODPRINTF(...);" keeps a body.
+#define ODPRINTF(a) ((void)0)
+#define ODPRINTFA(a) ((void)0)
+#endif // #ifdef _DEBUG
 
 #endif // #ifndef ODPRINTF
 
@@ -336,9 +338,10 @@ static BOOL loadToolhelpFunctions(void)
     if (!kernel32Module)
         return FALSE;
 
-    fnCreateToolhelp32Snapshot = (_CreateToolhelp32Snapshot)GetProcAddress(kernel32Module, "CreateToolhelp32Snapshot");
-    fnThread32First = (_Thread32First)GetProcAddress(kernel32Module, "Thread32First");
-    fnThread32Next = (_Thread32Next)GetProcAddress(kernel32Module, "Thread32Next");
+    fnCreateToolhelp32Snapshot =
+        (_CreateToolhelp32Snapshot)(void (*)(void))GetProcAddress(kernel32Module, "CreateToolhelp32Snapshot");
+    fnThread32First = (_Thread32First)(void (*)(void))GetProcAddress(kernel32Module, "Thread32First");
+    fnThread32Next = (_Thread32Next)(void (*)(void))GetProcAddress(kernel32Module, "Thread32Next");
 
     return fnCreateToolhelp32Snapshot && fnThread32First && fnThread32Next;
 }
@@ -860,8 +863,6 @@ static MHOOK_STATUS resolveSingleJump(PBYTE function, OUT PBYTE* nextFunction)
     default:
         return MHOOK_STATUS_SUCCESS;
     }
-
-    return MHOOK_STATUS_SUCCESS;
 }
 
 /**
@@ -1033,7 +1034,7 @@ static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE
     GetSystemInfo(&sSysInfo);
 
     // Always allocate in bulk, in case the system actually has a smaller allocation granularity than MINALLOCSIZE.
-    const ptrdiff_t cAllocSize = max(sSysInfo.dwAllocationGranularity, MHOOK_MINALLOCSIZE);
+    const SIZE_T cAllocSize = max(sSysInfo.dwAllocationGranularity, MHOOK_MINALLOCSIZE);
 
     MHOOKS_TRAMPOLINE* pRetVal = NULL;
     PBYTE pModuleGuess = (PBYTE)RoundDown((size_t)pSystemFunction, cAllocSize);
@@ -1046,7 +1047,7 @@ static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE
         if (!VirtualQuery(pbAlloc, &mbi, sizeof(mbi)))
             break;
         // free & large enough?
-        if (mbi.State == MEM_FREE && mbi.RegionSize >= (unsigned)cAllocSize)
+        if (mbi.State == MEM_FREE && mbi.RegionSize >= cAllocSize)
         {
             // and then try to allocate it
             pRetVal =
@@ -1054,7 +1055,7 @@ static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE
             if (pRetVal)
             {
                 size_t trampolineCount = cAllocSize / sizeof(MHOOKS_TRAMPOLINE);
-                ODPRINTF((L"mhooks: BlockAlloc: Allocated block at %p as %d trampolines", pRetVal, trampolineCount));
+                ODPRINTF((L"mhooks: BlockAlloc: Allocated block at %p as %zu trampolines", pRetVal, trampolineCount));
 
                 pRetVal[0].pPrevTrampoline = NULL;
                 pRetVal[0].pNextTrampoline = &pRetVal[1];
@@ -1078,7 +1079,7 @@ static MHOOKS_TRAMPOLINE* BlockAlloc(PBYTE pSystemFunction, PBYTE pbLower, PBYTE
         }
 
         // This is a spiral, should be -1, 1, -2, 2, -3, 3, etc. (* cAllocSize)
-        ptrdiff_t bytesToOffset = (cAllocSize * (loopCount + 1) * ((loopCount % 2 == 0) ? -1 : 1));
+        ptrdiff_t bytesToOffset = ((ptrdiff_t)cAllocSize * (loopCount + 1) * ((loopCount % 2 == 0) ? -1 : 1));
         pbAlloc = pbAlloc + bytesToOffset;
     }
 
@@ -1131,9 +1132,11 @@ static MHOOKS_TRAMPOLINE* reserveTrampoline(PBYTE systemFunction, S64 limitUp, S
     PBYTE lower = systemFunction + limitUp;
     lower = lower < (PBYTE)(DWORD_PTR)0x0000000080000000 ? (PBYTE)0x1 : lower - kMaximumRelativeJumpDistance;
 
+    // The bounds near the top of the address space are built with ~ at pointer
+    // width, so they mean the same thing on x86 instead of truncating a 64-bit
+    // literal.
     PBYTE upper = systemFunction + limitDown;
-    upper = upper < (PBYTE)(DWORD_PTR)0xffffffff80000000 ? upper + (DWORD_PTR)0x7ff80000
-                                                         : (PBYTE)(DWORD_PTR)0xfffffffffff80000;
+    upper = upper < (PBYTE) ~(DWORD_PTR)0x7fffffff ? upper + (DWORD_PTR)0x7ff80000 : (PBYTE) ~(DWORD_PTR)0x7ffff;
 
     ODPRINTF((L"mhooks: reserveTrampoline: Allocating for %p between %p and %p", systemFunction, lower, upper));
 
@@ -1515,6 +1518,10 @@ static void FixupIPRelativeAddressing(PBYTE pbNew, PBYTE pbOriginal, MHOOKS_PATC
         );
         *(PDWORD)(pbNew + pdata->rips[i].dwOffset) = dwNewDisplacement;
     }
+#else
+    (void)pbNew;
+    (void)pbOriginal;
+    (void)pdata;
 #endif
 }
 
@@ -1778,7 +1785,7 @@ static MHOOK_STATUS buildHookCode(
         if (!FlushInstructionCache(
                 GetCurrentProcess(),
                 trampoline->codeJumpToHookFunction,
-                hookStubEnd - trampoline->codeJumpToHookFunction
+                (SIZE_T)(hookStubEnd - trampoline->codeJumpToHookFunction)
             ))
             return MHOOK_STATUS_PATCH_FAILED;
 
@@ -1792,7 +1799,7 @@ static MHOOK_STATUS buildHookCode(
     if (!FlushInstructionCache(
             GetCurrentProcess(),
             trampoline->codeTrampoline,
-            trampolineEnd - trampoline->codeTrampoline
+            (SIZE_T)(trampolineEnd - trampoline->codeTrampoline)
         ))
         return MHOOK_STATUS_PATCH_FAILED;
 

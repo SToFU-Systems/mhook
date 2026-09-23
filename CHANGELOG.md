@@ -5,12 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.0.0] - 2026-09-22
+## [Unreleased]
 
-The first SToFU Systems release. It covers everything changed since the fork
-point, Marton Anka's mhook 2.4: a rewrite of the implementation in C, a
-diagnostic status API, batch operations, a test suite, a CMake build with a
-consumable package, continuous integration and generated documentation.
+The first SToFU Systems release, to be versioned 3.0.0. It covers everything
+changed since the fork point, Marton Anka's mhook 2.4: a rewrite of the
+implementation in C, a diagnostic status API, batch operations, a test suite,
+a CMake build with a consumable package, continuous integration and generated
+documentation.
 
 ### Added
 
@@ -42,6 +43,10 @@ consumable package, continuous integration and generated documentation.
 - **Continuous integration.** GitHub Actions builds and tests MSVC x86 and x64
   in Debug and Release, builds under MinGW GCC, checks formatting, and builds
   the documentation.
+- **Warning baseline.** Every target builds with `/W4` under MSVC and
+  `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` under
+  MinGW GCC, and preset and CI builds treat warnings as errors. The policy and
+  its few local suppressions are documented in the README.
 - **Build orchestration.** `setup.bat` with `scripts/setup.py` drives
   configuring, building, testing, packaging, documentation and formatting.
 - **Project conventions.** `.clang-format`, `.editorconfig`, `.gitattributes`,
@@ -90,6 +95,12 @@ consumable package, continuous integration and generated documentation.
 - Function-pointer slots are validated for alignment, readability and
   writability before use.
 - Missing includes and SDK structure packing issues were resolved.
+- The decoder named EAX, AX or AL for every general register operand encoded
+  in ModRM.rm, such as the destination of `mov ebx, cr0`.
+- The decoder's text output lost its terminating null and jumped to a wrong
+  write position when it filled its buffer; it is now truncated cleanly.
+- Two decoder diagnostics passed an integer where the message printed a
+  string.
 
 ### Removed
 

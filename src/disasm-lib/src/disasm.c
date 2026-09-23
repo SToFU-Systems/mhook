@@ -27,7 +27,9 @@
 #ifdef NO_SANITY_CHECKS
 #define NDEBUG
 #undef assert
-#define assert(x)
+// Names its argument without evaluating it, so values read only by an
+// assertion stay used and "if (c) assert(x);" keeps a body.
+#define assert(x) ((void)sizeof(!(x)))
 #endif
 
 //////////////////////////////////////////////////////////////////////
@@ -131,7 +133,7 @@ INSTRUCTION* GetInstruction(DISASSEMBLER* Disassembler, U64 VirtualAddress, U8* 
     assert(Address);
     InitInstruction(&Disassembler->Instruction, Disassembler);
     Disassembler->Instruction.Address = Address;
-    Disassembler->Instruction.VirtualAddressDelta = VirtualAddress - (U64)Address;
+    Disassembler->Instruction.VirtualAddressDelta = VirtualAddress - (U64)(ULONG_PTR)Address;
     if (!Disassembler->Functions->GetInstruction(&Disassembler->Instruction, Address, Flags))
     {
         assert(Disassembler->Instruction.Address == Address);

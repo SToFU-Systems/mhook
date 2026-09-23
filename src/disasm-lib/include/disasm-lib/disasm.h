@@ -196,7 +196,7 @@ typedef struct _DATA_REFERENCE
 /** Free for use by a new architecture; reused below as the ITYPE_EXT_* flags. */
 #define ITYPE_EXT_UNUSED4 (1 << 30)
 /** Free for use by a new architecture; reused below as the ITYPE_EXT_* flags. */
-#define ITYPE_EXT_UNUSED5 (1 << 31)
+#define ITYPE_EXT_UNUSED5 (1U << 31)
 /** @} */
 
 //
@@ -825,6 +825,15 @@ typedef struct DECLSPEC_ALIGN(16) _U128
     U64 High;
 } U128;
 
+// C4201: the value union below is anonymous. That is standard C11 and C++, and
+// GCC accepts it in gnu99, but MSVC's C front end still reports it as an
+// extension. C4324: the padding it reports is exactly what the 16-byte
+// alignment of U128 asks for. Neither points at a defect, and naming the union
+// would change every user of Operand->Value_*.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4201 4324)
+#endif
 /** @brief One decoded operand of an INSTRUCTION. */
 typedef struct _INSTRUCTION_OPERAND
 {
@@ -885,6 +894,9 @@ typedef struct _INSTRUCTION_OPERAND
         U8 BCD[10];
     };
 } INSTRUCTION_OPERAND;
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /** @brief One decoded instruction, filled in by GetInstruction(). */
 typedef struct _INSTRUCTION
