@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Warning baseline.** Every target builds with `/W4` under MSVC and
+  `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` under
+  MinGW GCC, and preset and CI builds treat warnings as errors. The policy and
+  its few local suppressions are documented in the README.
+
+### Fixed
+
+- The decoder named EAX, AX or AL for every general register operand encoded
+  in ModRM.rm, such as the destination of `mov ebx, cr0`.
+- The decoder's text output lost its terminating null and jumped to a wrong
+  write position when it filled its buffer; it is now truncated cleanly.
+- Two decoder diagnostics passed an integer where the message printed a
+  string.
+- In 32-bit MinGW builds the decoder sign-extended addresses above 2 GB when it
+  widened them to 64 bits; it now zero-extends them, as MSVC builds always did.
+
 ## [3.0.0] - 2026-09-22
 
 The first SToFU Systems release. It covers everything changed since the fork
