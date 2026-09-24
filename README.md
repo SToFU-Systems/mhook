@@ -53,6 +53,87 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
 | `MHOOK_STATUS_THREAD_RESUME_FAILED` | A suspended peer could not be resumed and may stay suspended. Reported over any other status, even when the operation returned `TRUE` and its hooks are in place. | Treat the process as possibly deadlocked and stop further hook changes. |
 
+### Batch example
+
+`Mhook_SetHookBatch` installs several hooks at once, all or nothing, and `Mhook_UnhookBatch` removes them the same way. Each `MHOOK_HOOK_INFO` names a slot that holds the function to hook: a successful install replaces it with a trampoline, which a hook calls to reach the original, and a successful removal puts the original back, so one descriptor array serves both calls. The library needs no initialization or shutdown call.
+
+<!-- readme-batch-example:begin -->
+```cpp
+#include <windows.h>
+#include <stdio.h>
+#include <mhook-lib/mhook.h>
+
+// Each slot starts out holding the real function.
+static decltype(&GetCurrentDirectoryW) TrueGetCurrentDirectoryW = GetCurrentDirectoryW;
+static decltype(&GetFileAttributesW) TrueGetFileAttributesW = GetFileAttributesW;
+
+static DWORD WINAPI HookGetCurrentDirectoryW(DWORD bufferLength, LPWSTR buffer)
+{
+    printf("hooked GetCurrentDirectoryW\n");
+    return TrueGetCurrentDirectoryW(bufferLength, buffer);
+}
+
+static DWORD WINAPI HookGetFileAttributesW(LPCWSTR fileName)
+{
+    printf("hooked GetFileAttributesW\n");
+    return TrueGetFileAttributesW(fileName);
+}
+
+static void printFailure(const char* operation, const MHOOK_HOOK_INFO* hooks, unsigned hookCount)
+{
+    // The call's status is the batch's; each descriptor carries its own.
+    printf("%s failed with status %d\n", operation, (int)Mhook_GetLastStatus());
+    for (unsigned index = 0; index < hookCount; ++index)
+        printf("  hook %u: status %d\n", index, (int)hooks[index].status);
+}
+
+int main(void)
+{
+    MHOOK_HOOK_INFO hooks[] = {
+        {reinterpret_cast<PVOID*>(&TrueGetCurrentDirectoryW),
+         reinterpret_cast<PVOID>(&HookGetCurrentDirectoryW),
+         MHOOK_STATUS_SUCCESS},
+        {reinterpret_cast<PVOID*>(&TrueGetFileAttributesW),
+         reinterpret_cast<PVOID>(&HookGetFileAttributesW),
+         MHOOK_STATUS_SUCCESS},
+    };
+
+    if (!Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+    {
+        printFailure("Mhook_SetHookBatch", hooks, ARRAYSIZE(hooks));
+        return 1;
+    }
+
+    // Every call in the process now reaches the hooks, which call through to the originals.
+    WCHAR directory[MAX_PATH];
+    GetCurrentDirectoryW(MAX_PATH, directory);
+    GetFileAttributesW(directory);
+
+    // The same descriptors remove the hooks and put the real functions back in the slots.
+    if (!Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+    {
+        printFailure("Mhook_UnhookBatch", hooks, ARRAYSIZE(hooks));
+        return 1;
+    }
+
+    // Not hooked any more, so this prints nothing.
+    GetFileAttributesW(directory);
+    return 0;
+}
+```
+<!-- readme-batch-example:end -->
+
+It prints:
+
+```text
+hooked GetCurrentDirectoryW
+hooked GetFileAttributesW
+```
+
+After a successful removal nothing needs cleaning up. The trampolines stay allocated, because a thread may still be returning through one, but they must not be called again. Link against `mhook::mhook`, as shown under [Install](#install) and [Use as a subproject](#use-as-a-subproject).
+
+The build compiles and runs this exact block as the `mhook.readme.batch_example` test, so it cannot fall out of step with `mhook.h`. The `batch` case in [tests/hook-test.cpp](tests/hook-test.cpp) covers the same calls in more detail, including per-descriptor statuses and preservation of `GetLastError`.
+
 ### Threads and access rights
 
 Before it rewrites any code, Mhook suspends every other thread in the process, so none of them can execute bytes that are half written. It lists the threads with a Toolhelp snapshot and repeats the snapshot until one shows no thread it has not already suspended, which normally takes two. A thread stopped inside a range about to be patched is resumed and checked again, up to three times, 100 ms apart. Threads that exit before Mhook reaches them are skipped.
