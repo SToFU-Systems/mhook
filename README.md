@@ -53,6 +53,24 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
 | `MHOOK_STATUS_THREAD_RESUME_FAILED` | A suspended peer could not be resumed and may stay suspended. Reported over any other status, even when the operation returned `TRUE` and its hooks are in place. | Treat the process as possibly deadlocked and stop further hook changes. |
 
+### Threads and access rights
+
+Before it rewrites any code, Mhook suspends every other thread in the process, so none of them can execute bytes that are half written. It lists the threads with a Toolhelp snapshot and repeats the snapshot until one shows no thread it has not already suspended, which normally takes two. A thread stopped inside a range about to be patched is resumed and checked again, up to three times, 100 ms apart. Threads that exit before Mhook reaches them are skipped.
+
+Mhook opens only threads of its own process, and asks for no more than it uses:
+
+| Right | Used for |
+| --- | --- |
+| `THREAD_SUSPEND_RESUME` | Suspending and resuming the thread. |
+| `THREAD_GET_CONTEXT` | Reading its instruction pointer. |
+| `SYNCHRONIZE` | Only when a thread refuses suspension, to wait up to 100 ms for it to finish exiting. |
+
+No privilege is required. Each right is checked against the thread's security descriptor, which by default grants the user who created the thread full access, so hooking works from a standard user account and from a Low integrity process; the hook tests pass in both. Mhook never opens another process's threads, so the limits a protected process places on access from other processes do not apply to it.
+
+A thread whose DACL withholds one of these rights, as some sandboxes and anti-tamper components arrange, fails the operation with `MHOOK_STATUS_THREAD_ACCESS_DENIED` and changes nothing, because patching while that thread keeps running would be unsafe. An enabled `SeDebugPrivilege` bypasses thread DACLs.
+
+One race remains. A thread started from outside the process, by `CreateRemoteThread` from another process or by the kernel, can appear after the last snapshot and run while the code is patched. Mhook cannot stop a thread it has not seen.
+
 ## Documentation
 
 The API reference documents the public interface, rendered from the Doxygen
