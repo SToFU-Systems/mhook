@@ -75,6 +75,41 @@ endforeach()
 
 source_group("test" FILES consumer-test.inc)
 
+# The README's batch example is compiled and run straight out of the README, and
+# its output compared with the output the README shows, so the sample users copy
+# cannot drift from mhook.h. It builds as a consumer's code would: linked to
+# mhook::mhook and nothing else, with warnings as errors.
+set(readmePath "${PROJECT_SOURCE_DIR}/README.md")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${readmePath}")
+file(READ "${readmePath}" readmeText)
+
+string(REGEX MATCH
+    "<!-- readme-batch-example:begin -->\r?\n```cpp\r?\n(.*)```\r?\n<!-- readme-batch-example:end -->"
+    readmeExample "${readmeText}")
+if(NOT readmeExample)
+    message(FATAL_ERROR "README.md has no readme-batch-example block")
+endif()
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/readme-batch-example.cpp" CONTENT "${CMAKE_MATCH_1}" @ONLY)
+
+string(REGEX MATCH
+    "<!-- readme-batch-example:end -->\r?\n\r?\nIt prints:\r?\n\r?\n```text\r?\n([^`]*)```"
+    readmeOutput "${readmeText}")
+if(NOT readmeOutput)
+    message(FATAL_ERROR "README.md does not show the batch example's output")
+endif()
+string(REPLACE "\r\n" "\n" readmeOutput "${CMAKE_MATCH_1}")
+string(REGEX REPLACE "([][+.*()^$?|\\\\])" "\\\\\\1" readmeOutput "${readmeOutput}")
+string(REPLACE "\n" "\r?\n" readmeOutput "${readmeOutput}")
+
+add_executable(mhook-readme-batch-example "${CMAKE_CURRENT_BINARY_DIR}/readme-batch-example.cpp")
+target_link_libraries(mhook-readme-batch-example PRIVATE mhook::mhook)
+set_target_properties(mhook-readme-batch-example PROPERTIES COMPILE_WARNING_AS_ERROR ON)
+mhook_enable_warnings(mhook-readme-batch-example)
+add_test(NAME mhook.readme.batch_example COMMAND mhook-readme-batch-example)
+set_tests_properties(mhook.readme.batch_example PROPERTIES
+    TIMEOUT 15
+    PASS_REGULAR_EXPRESSION "^${readmeOutput}$")
+
 set(directSources
     "${PROJECT_SOURCE_DIR}/src/mhook-lib/src/mhook.c"
     "${PROJECT_SOURCE_DIR}/src/disasm-lib/src/cpu.c"
@@ -128,6 +163,13 @@ set(hookCases
     short_func
     threads
     suspend_failure
+    first_use_race
+    late_thread
+    thread_churn
+    enumeration_failure
+    exited_thread
+    thread_busy
+    resume_failure
     reuse
     sweep
 )
@@ -141,7 +183,7 @@ if(MHOOK_ARCHITECTURE STREQUAL "x64")
     set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
 endif()
 
-# Every hook and unhook pair costs two system wide thread snapshots inside the
+# Every hook and unhook pair costs at least two system wide thread snapshots in the
 # library, and that rate, not the hook engine, sets the runtime of the bulk
 # cases. They therefore sample by default, which is what these timeouts are
 # sized for. Setting MHOOK_TEST_EXHAUSTIVE in the environment runs them in full

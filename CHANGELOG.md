@@ -18,7 +18,9 @@ documentation.
 - **Failure diagnostics.** `Mhook_GetLastStatus()` and the `MHOOK_STATUS` enum
   report why an operation failed, where previously only a boolean was
   available. The status is per thread and is replaced by that thread's next
-  hook or unhook operation.
+  hook or unhook operation. Thread coordination failures say which step
+  failed: listing threads, access to a thread, a thread that stays busy in
+  the code being patched, or a thread that could not be resumed.
 - **Batch operations.** `Mhook_SetHookBatch()` and `Mhook_UnhookBatch()` install
   or remove a set of hooks all-or-nothing: if any member of the batch cannot be
   prepared or published, none of them are.
@@ -92,6 +94,21 @@ documentation.
 - Targets are validated as live and executable before unhooking.
 - A failure to suspend a thread now aborts the operation rather than letting it
   proceed with threads possibly executing the code being patched.
+- Concurrent first calls into the library could initialize the lock guarding
+  the hook registry twice, one of them while the other thread held it. The lock
+  is now a statically initialized slim reader/writer lock, which also makes
+  Windows Vista the minimum supported version.
+- A thread started by a peer after the thread snapshot was taken kept running
+  while the target was patched. Snapshots are now repeated until one lists no
+  thread that is not already suspended, which normally takes two; a thread set
+  that has not settled after eight fails with `MHOOK_STATUS_THREAD_BUSY`. A
+  thread injected from outside the process can still start after the last
+  snapshot.
+- A thread that exited between the snapshot and its suspension failed the
+  whole operation. It is now skipped once it has finished exiting.
+- A peer thread that could not be resumed was only written to the debug
+  output. It is now reported as `MHOOK_STATUS_THREAD_RESUME_FAILED`, even when
+  the operation itself completed.
 - Function-pointer slots are validated for alignment, readability and
   writability before use.
 - Missing includes and SDK structure packing issues were resolved.

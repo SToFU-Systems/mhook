@@ -40,7 +40,7 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED` | No suitable trampoline could be allocated. | Retry only if memory availability may have changed. |
 | `MHOOK_STATUS_MEMORY_PROTECTION_FAILED` | A required memory-protection change failed. | Stop the operation and retry only if process conditions may have changed. |
 | `MHOOK_STATUS_HOOK_NOT_FOUND` | The supplied pointer does not identify an active hook. | Correct the hook lifecycle or pointer before retrying. |
-| `MHOOK_STATUS_THREAD_SUSPENSION_FAILED` | Required thread coordination failed. | Stop changing hooks and retry only if thread conditions may have changed. |
+| `MHOOK_STATUS_THREAD_SUSPENSION_FAILED` | A peer thread could not be suspended or inspected, or the list of suspended threads could not grow. | Stop changing hooks and retry only if thread conditions may have changed. |
 | `MHOOK_STATUS_PATCH_FAILED` | Publishing modified code failed. | Treat the hook state as uncertain and stop further hook changes. |
 | `MHOOK_STATUS_TARGET_MODIFIED` | Another writer modified the target after the hook was installed. | Leave the hook installed and retry only after Mhook's patch has been restored. |
 | `MHOOK_STATUS_INVALID_DESCRIPTOR` | The supplied function-pointer slot is misaligned, unreadable, or unwritable. | Pass an aligned pointer to readable and writable `PVOID` storage. |
@@ -48,6 +48,109 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_JUMP_CYCLE` | Entry-point jump resolution encountered an address it had already visited. | Correct the cyclic thunk chain before retrying. |
 | `MHOOK_STATUS_JUMP_DEPTH_EXCEEDED` | Entry-point jump resolution would follow more than 16 jumps. | Shorten the thunk chain before retrying. |
 | `MHOOK_STATUS_ALREADY_HOOKED` | Either the requested target or replacement resolution chain reached a target with an active hook. | Reuse or remove the existing hook before retrying. |
+| `MHOOK_STATUS_THREAD_ENUMERATION_FAILED` | The process's threads could not be listed. | Stop changing hooks and retry only if process conditions may have changed. |
+| `MHOOK_STATUS_THREAD_ACCESS_DENIED` | A peer thread refused the suspend, resume and get-context rights Mhook needs. | Do not retry; the process's thread security does not permit hooking. |
+| `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
+| `MHOOK_STATUS_THREAD_RESUME_FAILED` | A suspended peer could not be resumed and may stay suspended. Reported over any other status, even when the operation returned `TRUE` and its hooks are in place. | Treat the process as possibly deadlocked and stop further hook changes. |
+
+### Batch example
+
+`Mhook_SetHookBatch` installs several hooks at once, all or nothing, and `Mhook_UnhookBatch` removes them the same way. Each `MHOOK_HOOK_INFO` names a slot that holds the function to hook: a successful install replaces it with a trampoline, which a hook calls to reach the original, and a successful removal puts the original back, so one descriptor array serves both calls. The library needs no initialization or shutdown call.
+
+<!-- readme-batch-example:begin -->
+```cpp
+#include <windows.h>
+#include <stdio.h>
+#include <mhook-lib/mhook.h>
+
+// Each slot starts out holding the real function.
+static decltype(&GetCurrentDirectoryW) TrueGetCurrentDirectoryW = GetCurrentDirectoryW;
+static decltype(&GetFileAttributesW) TrueGetFileAttributesW = GetFileAttributesW;
+
+static DWORD WINAPI HookGetCurrentDirectoryW(DWORD bufferLength, LPWSTR buffer)
+{
+    printf("hooked GetCurrentDirectoryW\n");
+    return TrueGetCurrentDirectoryW(bufferLength, buffer);
+}
+
+static DWORD WINAPI HookGetFileAttributesW(LPCWSTR fileName)
+{
+    printf("hooked GetFileAttributesW\n");
+    return TrueGetFileAttributesW(fileName);
+}
+
+static void printFailure(const char* operation, const MHOOK_HOOK_INFO* hooks, unsigned hookCount)
+{
+    // The call's status is the batch's; each descriptor carries its own.
+    printf("%s failed with status %d\n", operation, (int)Mhook_GetLastStatus());
+    for (unsigned index = 0; index < hookCount; ++index)
+        printf("  hook %u: status %d\n", index, (int)hooks[index].status);
+}
+
+int main(void)
+{
+    MHOOK_HOOK_INFO hooks[] = {
+        {reinterpret_cast<PVOID*>(&TrueGetCurrentDirectoryW),
+         reinterpret_cast<PVOID>(&HookGetCurrentDirectoryW),
+         MHOOK_STATUS_SUCCESS},
+        {reinterpret_cast<PVOID*>(&TrueGetFileAttributesW),
+         reinterpret_cast<PVOID>(&HookGetFileAttributesW),
+         MHOOK_STATUS_SUCCESS},
+    };
+
+    if (!Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+    {
+        printFailure("Mhook_SetHookBatch", hooks, ARRAYSIZE(hooks));
+        return 1;
+    }
+
+    // Every call in the process now reaches the hooks, which call through to the originals.
+    WCHAR directory[MAX_PATH];
+    GetCurrentDirectoryW(MAX_PATH, directory);
+    GetFileAttributesW(directory);
+
+    // The same descriptors remove the hooks and put the real functions back in the slots.
+    if (!Mhook_UnhookBatch(hooks, ARRAYSIZE(hooks)))
+    {
+        printFailure("Mhook_UnhookBatch", hooks, ARRAYSIZE(hooks));
+        return 1;
+    }
+
+    // Not hooked any more, so this prints nothing.
+    GetFileAttributesW(directory);
+    return 0;
+}
+```
+<!-- readme-batch-example:end -->
+
+It prints:
+
+```text
+hooked GetCurrentDirectoryW
+hooked GetFileAttributesW
+```
+
+After a successful removal nothing needs cleaning up. The trampolines stay allocated, because a thread may still be returning through one, but they must not be called again. Link against `mhook::mhook`, as shown under [Install](#install) and [Use as a subproject](#use-as-a-subproject).
+
+The build compiles and runs this exact block as the `mhook.readme.batch_example` test, so it cannot fall out of step with `mhook.h`. The `batch` case in [tests/hook-test.cpp](tests/hook-test.cpp) covers the same calls in more detail, including per-descriptor statuses and preservation of `GetLastError`.
+
+### Threads and access rights
+
+Before it rewrites any code, Mhook suspends every other thread in the process, so none of them can execute bytes that are half written. It lists the threads with a Toolhelp snapshot and repeats the snapshot until one shows no thread it has not already suspended, which normally takes two. A thread stopped inside a range about to be patched is resumed and checked again, up to three times, 100 ms apart. Threads that exit before Mhook reaches them are skipped.
+
+Mhook opens only threads of its own process, and asks for no more than it uses:
+
+| Right | Used for |
+| --- | --- |
+| `THREAD_SUSPEND_RESUME` | Suspending and resuming the thread. |
+| `THREAD_GET_CONTEXT` | Reading its instruction pointer. |
+| `SYNCHRONIZE` | Only when a thread refuses suspension, to wait up to 100 ms for it to finish exiting. |
+
+No privilege is required. Each right is checked against the thread's security descriptor, which by default grants the user who created the thread full access, so hooking works from a standard user account and from a Low integrity process; the hook tests pass in both. Mhook never opens another process's threads, so the limits a protected process places on access from other processes do not apply to it.
+
+A thread whose DACL withholds one of these rights, as some sandboxes and anti-tamper components arrange, fails the operation with `MHOOK_STATUS_THREAD_ACCESS_DENIED` and changes nothing, because patching while that thread keeps running would be unsafe. An enabled `SeDebugPrivilege` bypasses thread DACLs.
+
+One race remains. A thread started from outside the process, by `CreateRemoteThread` from another process or by the kernel, can appear after the last snapshot and run while the code is patched. Mhook cannot stop a thread it has not seen.
 
 ## Documentation
 
@@ -75,7 +178,7 @@ as a build artifact, so it can be read without building anything locally.
 
 ### Requirements
 
-- Windows, targeting x86 or x64.
+- Windows, targeting x86 or x64. The library runs on Windows Vista or newer.
 - CMake 3.24 or newer, available on `PATH`.
 - Python 3.9 or newer, for `setup.bat`.
 - For MSVC builds: Visual Studio 2022 or Build Tools 2022 with C++ tools and a Windows SDK.

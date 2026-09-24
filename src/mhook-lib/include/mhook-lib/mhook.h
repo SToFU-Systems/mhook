@@ -56,6 +56,8 @@ extern "C"
  * Mhook_SetHook() and Mhook_Unhook() store one of these values for the calling
  * thread. The value describes the first detected internal failure unless a
  * later failure determines that the operation itself cannot complete.
+ * MHOOK_STATUS_THREAD_RESUME_FAILED is the one status that can accompany a
+ * successful operation.
  *
  */
 typedef enum MHOOK_STATUS
@@ -81,7 +83,7 @@ typedef enum MHOOK_STATUS
     /** The supplied trampoline does not identify an active hook. */
     MHOOK_STATUS_HOOK_NOT_FOUND = 6,
 
-    /** Thread enumeration, inspection, or suspension failed. */
+    /** A peer thread could not be suspended or inspected, or the suspended-thread list could not grow. */
     MHOOK_STATUS_THREAD_SUSPENSION_FAILED = 7,
 
     /** An instruction-cache flush for modified code failed. */
@@ -103,7 +105,25 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_JUMP_DEPTH_EXCEEDED = 13,
 
     /** A resolved request conflicts with an active hook or another batch entry. */
-    MHOOK_STATUS_ALREADY_HOOKED = 14
+    MHOOK_STATUS_ALREADY_HOOKED = 14,
+
+    /** The process's threads could not be listed. */
+    MHOOK_STATUS_THREAD_ENUMERATION_FAILED = 15,
+
+    /** A peer thread refused the suspend, resume, and get-context rights Mhook needs. */
+    MHOOK_STATUS_THREAD_ACCESS_DENIED = 16,
+
+    /**
+     * A peer kept executing the code being patched, was still exiting, or new threads kept
+     * starting. Nothing was changed, and the operation may succeed if retried.
+     */
+    MHOOK_STATUS_THREAD_BUSY = 17,
+
+    /**
+     * A suspended peer could not be resumed and may stay suspended. Reported over any other
+     * status, including after an operation that completed and returned TRUE.
+     */
+    MHOOK_STATUS_THREAD_RESUME_FAILED = 18
 } MHOOK_STATUS;
 
 /**
