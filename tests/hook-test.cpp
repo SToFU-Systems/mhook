@@ -39,8 +39,8 @@ static int Fail(const char* message)
 // DisassembleAndSkip can accept for MHOOK_JMPSIZE.
 static const BYTE kMovEaxRet[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
 
-// Every hook and unhook pair costs two system wide thread snapshots inside
-// SuspendOtherThreads, which dominates the runtime of the bulk cases. CI cannot
+// Every hook and unhook pair costs at least two system wide thread snapshots in
+// suspendOtherThreads, which dominates the runtime of the bulk cases. CI cannot
 // afford the exhaustive versions, so they sample deterministically by default
 // and run in full when MHOOK_TEST_EXHAUSTIVE is set in the environment.
 static bool Exhaustive(void)
@@ -1448,6 +1448,104 @@ static int caseFirstUseRace(void)
     return 0;
 }
 
+typedef HANDLE(WINAPI* SnapshotFunction)(DWORD flags, DWORD processId);
+
+static SnapshotFunction g_originalSnapshot = NULL;
+static BOOL g_snapshotArmed = FALSE;
+static DWORD g_snapshotCalls = 0;
+static HANDLE g_lateThread = NULL;
+static BOOL g_lateThreadSeenSuspended = FALSE;
+
+/**
+ * @brief Starts a thread just after the library's first snapshot, then watches whether it is held.
+ * @param[in] flags Snapshot flags forwarded to the original function.
+ * @param[in] processId Process forwarded to the original function.
+ * @return The snapshot taken by the original function.
+ */
+static HANDLE WINAPI snapshotStartingLateThread(DWORD flags, DWORD processId)
+{
+    HANDLE snapshot = g_originalSnapshot(flags, processId);
+    if (!g_snapshotArmed)
+        return snapshot;
+
+    ++g_snapshotCalls;
+    if (g_snapshotCalls == 1)
+    {
+        // Nothing is suspended yet, and this snapshot cannot list the new thread.
+        g_lateThread = CreateThread(NULL, 0, waitForStop, NULL, 0, NULL);
+    }
+    else if (g_lateThread)
+    {
+        // A later snapshot that finds the thread already suspended proves the library went back for it.
+        const DWORD previousSuspendCount = SuspendThread(g_lateThread);
+        if (previousSuspendCount != (DWORD)-1)
+        {
+            if (previousSuspendCount != 0)
+                g_lateThreadSeenSuspended = TRUE;
+            ResumeThread(g_lateThread);
+        }
+    }
+
+    return snapshot;
+}
+
+/**
+ * @brief Verifies that a thread started after the first snapshot is suspended before code is patched.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseLateThread(void)
+{
+    g_originalSnapshot = reinterpret_cast<SnapshotFunction>(
+        reinterpret_cast<void (*)(void)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CreateToolhelp32Snapshot"))
+    );
+    if (!g_originalSnapshot)
+        return Fail("CreateToolhelp32Snapshot could not be resolved");
+
+    PVOID snapshotTrampoline = reinterpret_cast<PVOID>(g_originalSnapshot);
+    if (!Mhook_SetHook(&snapshotTrampoline, reinterpret_cast<PVOID>(&snapshotStartingLateThread)))
+        return Fail("hooking CreateToolhelp32Snapshot failed");
+    g_originalSnapshot = reinterpret_cast<SnapshotFunction>(snapshotTrampoline);
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    const char* failure = target ? NULL : "VirtualAlloc for the late thread target failed";
+
+    g_stopThreads = 0;
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        g_snapshotArmed = TRUE;
+        const BOOL hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+        g_snapshotArmed = FALSE;
+
+        if (!hookResult)
+            failure = "Mhook_SetHook failed while a thread started during suspension";
+        else if (!g_lateThread)
+            failure = "CreateThread for the late thread failed";
+        else if (!g_lateThreadSeenSuspended)
+            failure = "a thread started after the first snapshot was never suspended";
+        else if (!peerSuspensionsWereReleased(&g_lateThread, 1))
+            failure = "the late thread remained suspended after the hook was installed";
+    }
+
+    InterlockedExchange(&g_stopThreads, 1);
+    if (g_lateThread)
+    {
+        WaitForSingleObject(g_lateThread, INFINITE);
+        CloseHandle(g_lateThread);
+    }
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    if (!Mhook_Unhook(&snapshotTrampoline) && !failure)
+        failure = "removing the CreateToolhelp32Snapshot hook failed";
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
 static int CaseReuse(void)
 {
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
@@ -1739,6 +1837,7 @@ static const TestCase kCases[] = {
     {"threads", CaseThreads},
     {"suspend_failure", caseSuspensionFailure},
     {"first_use_race", caseFirstUseRace},
+    {"late_thread", caseLateThread},
     {"reuse", CaseReuse},
 #ifdef _M_X64
     {"pool", caseTrampolinePoolBookkeeping},

@@ -129,6 +129,7 @@ set(hookCases
     threads
     suspend_failure
     first_use_race
+    late_thread
     reuse
     sweep
 )
@@ -142,7 +143,7 @@ if(MHOOK_ARCHITECTURE STREQUAL "x64")
     set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
 endif()
 
-# Every hook and unhook pair costs two system wide thread snapshots inside the
+# Every hook and unhook pair costs at least two system wide thread snapshots in the
 # library, and that rate, not the hook engine, sets the runtime of the bulk
 # cases. They therefore sample by default, which is what these timeouts are
 # sized for. Setting MHOOK_TEST_EXHAUSTIVE in the environment runs them in full
