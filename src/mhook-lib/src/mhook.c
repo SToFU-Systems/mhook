@@ -206,12 +206,24 @@ typedef struct MHOOKS_PATCHDATA
 } MHOOKS_PATCHDATA;
 
 /**
- * @brief Stores handles for other threads suspended by the current hook operation so they can be resumed.
+ * @brief Identifies one peer thread suspended by the current hook operation.
+ */
+typedef struct SuspendedThread
+{
+    HANDLE handle;
+    DWORD threadId;
+} SuspendedThread;
+
+/**
+ * @brief Stores the peer threads suspended by the current hook operation so they can be resumed.
+ * @remark The storage comes from VirtualAlloc, not the heap: it grows while peers are suspended,
+ *         and a suspended peer may hold the heap lock.
  */
 typedef struct ThreadSuspension
 {
-    HANDLE* handles;
+    SuspendedThread* threads;
     SIZE_T count;
+    SIZE_T capacity;
 } ThreadSuspension;
 
 //=========================================================================
@@ -1212,7 +1224,7 @@ static void retireTrampoline(MHOOKS_TRAMPOLINE* trampoline)
 
 /**
  * @brief Releases every peer-thread suspension owned by one transaction.
- * @param[in,out] suspension Owned handles to resume, close, and discard.
+ * @param[in,out] suspension Owned threads to resume, close, and discard.
  */
 static void resumeOtherThreads(ThreadSuspension* suspension)
 {
@@ -1221,7 +1233,7 @@ static void resumeOtherThreads(ThreadSuspension* suspension)
     // Attempt every release even when an earlier thread cannot be resumed.
     for (SIZE_T index = 0; index < suspension->count; ++index)
     {
-        HANDLE handle = suspension->handles[index];
+        HANDLE handle = suspension->threads[index].handle;
         assert(GOOD_HANDLE(handle));
 
         if (ResumeThread(handle) == (DWORD)-1)
@@ -1231,35 +1243,66 @@ static void resumeOtherThreads(ThreadSuspension* suspension)
             ODPRINTF((L"mhooks: resumeOtherThreads: failed to close a peer thread handle: %d", gle()));
     }
 
-    // Discard the handle array after every thread release was attempted.
-    free(suspension->handles);
-    suspension->handles = NULL;
+    // Discard the thread list after every thread release was attempted.
+    if (suspension->threads && !VirtualFree(suspension->threads, 0, MEM_RELEASE))
+        ODPRINTF((L"mhooks: resumeOtherThreads: failed to free the suspended thread list: %d", gle()));
+
+    suspension->threads = NULL;
     suspension->count = 0;
+    suspension->capacity = 0;
 }
 
 /**
- * @brief Cancels an incomplete suspension and preserves the operation error.
- * @param[in] snapshot Thread snapshot to close before returning.
- * @param[in,out] suspension Peer-thread handles already owned by the transaction.
- * @return The thread-suspension failure status.
+ * @brief Reports whether a thread is already suspended by this transaction.
+ * @param[in] suspension Threads suspended so far.
+ * @param[in] threadId Identifier to look for.
+ * @return TRUE when threadId is in the suspension.
+ * @remark An identifier cannot be reused while this transaction holds a handle to its thread.
  */
-static MHOOK_STATUS cancelThreadSuspension(HANDLE snapshot, ThreadSuspension* suspension)
+static BOOL isThreadSuspended(const ThreadSuspension* suspension, DWORD threadId)
 {
-    assert(GOOD_HANDLE(snapshot));
     assert(suspension);
 
-    // Preserve the failure across snapshot and thread cleanup.
-    const DWORD failureError = GetLastError();
+    // ponytail: linear scan per snapshot entry, quadratic in the thread count; a sorted set if that ever shows up.
+    for (SIZE_T index = 0; index < suspension->count; ++index)
+    {
+        if (suspension->threads[index].threadId == threadId)
+            return TRUE;
+    }
 
-    // Release every resource acquired before the suspension failed.
-    if (!CloseHandle(snapshot))
-        ODPRINTF((L"mhooks: cancelThreadSuspension: failed to close the thread snapshot: %d", gle()));
+    return FALSE;
+}
 
-    resumeOtherThreads(suspension);
+/**
+ * @brief Guarantees room for one more suspended thread before the next suspension.
+ * @param[in,out] suspension Thread list to grow when it is full.
+ * @return TRUE when the list can take another entry.
+ */
+static BOOL reserveSuspendedThread(ThreadSuspension* suspension)
+{
+    assert(suspension);
 
-    // Return the original Win32 error to the caller.
-    SetLastError(failureError);
-    return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
+    if (suspension->count < suspension->capacity)
+        return TRUE;
+
+    // Grow without the heap, which a suspended peer may have locked.
+    const SIZE_T kInitialCapacity = 256;
+    const SIZE_T capacity = suspension->capacity ? suspension->capacity * 2 : kInitialCapacity;
+    SuspendedThread* threads =
+        (SuspendedThread*)VirtualAlloc(NULL, capacity * sizeof(*threads), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!threads)
+        return FALSE;
+
+    if (suspension->threads)
+    {
+        memcpy(threads, suspension->threads, suspension->count * sizeof(*threads));
+        if (!VirtualFree(suspension->threads, 0, MEM_RELEASE))
+            ODPRINTF((L"mhooks: reserveSuspendedThread: failed to free the previous thread list: %d", gle()));
+    }
+
+    suspension->threads = threads;
+    suspension->capacity = capacity;
+    return TRUE;
 }
 
 /**
@@ -1372,11 +1415,90 @@ static BOOL suspendOneThread(
 }
 
 /**
- * @brief Suspends every peer in one snapshot before executable ranges are modified.
+ * @brief Suspends every peer in a fresh snapshot that earlier snapshots did not list.
+ * @param[in] trampolines Prepared or active hooks whose target bytes will be changed.
+ * @param[in] trampolineCount Number of entries in trampolines.
+ * @param[in,out] suspension Threads suspended so far, extended with the newly suspended ones.
+ * @return TRUE when every newly listed peer is suspended at a safe instruction pointer.
+ */
+static BOOL suspendSnapshotThreads(
+    MHOOKS_TRAMPOLINE** trampolines,
+    SIZE_T trampolineCount,
+    ThreadSuspension* suspension
+)
+{
+    assert(trampolines);
+    assert(trampolineCount);
+    assert(suspension);
+
+    const DWORD processId = GetCurrentProcessId();
+    const DWORD currentThreadId = GetCurrentThreadId();
+
+    HANDLE snapshot = fnCreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, processId);
+    if (!GOOD_HANDLE(snapshot))
+        return FALSE;
+
+    THREADENTRY32 entry = {0};
+    entry.dwSize = sizeof(entry);
+
+    BOOL isComplete = fnThread32First(snapshot, &entry);
+    while (isComplete)
+    {
+        const BOOL isNewPeer = entry.th32OwnerProcessID == processId && entry.th32ThreadID != currentThreadId &&
+                               !isThreadSuspended(suspension, entry.th32ThreadID);
+
+        if (isNewPeer)
+        {
+            if (!reserveSuspendedThread(suspension))
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                isComplete = FALSE;
+                break;
+            }
+
+            HANDLE suspendedHandle = NULL;
+            const BOOL isSuspended =
+                suspendOneThread(entry.th32ThreadID, trampolines, trampolineCount, &suspendedHandle);
+
+            if (GOOD_HANDLE(suspendedHandle))
+            {
+                suspension->threads[suspension->count].handle = suspendedHandle;
+                suspension->threads[suspension->count].threadId = entry.th32ThreadID;
+                ++suspension->count;
+            }
+
+            if (!isSuspended)
+            {
+                isComplete = FALSE;
+                break;
+            }
+        }
+
+        entry.dwSize = sizeof(entry);
+        if (!fnThread32Next(snapshot, &entry))
+        {
+            isComplete = GetLastError() == ERROR_NO_MORE_FILES;
+            break;
+        }
+    }
+
+    // Preserve the failure across snapshot cleanup.
+    const DWORD lastError = GetLastError();
+    if (!CloseHandle(snapshot))
+        ODPRINTF((L"mhooks: suspendSnapshotThreads: failed to close the thread snapshot: %d", gle()));
+
+    SetLastError(lastError);
+    return isComplete;
+}
+
+/**
+ * @brief Suspends every peer, including threads started while earlier peers were being suspended.
  * @param[in] trampolines Prepared or active hooks whose target bytes will be changed.
  * @param[in] trampolineCount Number of entries in trampolines.
  * @param[out] suspension Owned suspension context to release after code modification.
- * @return Success when every peer in the snapshot is suspended at a safe instruction pointer.
+ * @return Success once a snapshot lists no peer that is not already suspended at a safe instruction pointer.
+ * @remark A thread started from outside the process, by CreateRemoteThread or by the kernel, can
+ *         still appear after the final snapshot. Only the process's own threads are held.
  */
 static MHOOK_STATUS suspendOtherThreads(
     MHOOKS_TRAMPOLINE** trampolines,
@@ -1388,107 +1510,39 @@ static MHOOK_STATUS suspendOtherThreads(
     assert(trampolineCount);
     assert(suspension);
 
-    const DWORD processId = GetCurrentProcessId();
-    const DWORD currentThreadId = GetCurrentThreadId();
+    const DWORD kMaximumSnapshotPasses = 8;
 
-    suspension->handles = NULL;
+    suspension->threads = NULL;
     suspension->count = 0;
+    suspension->capacity = 0;
 
-    // Capture one stable thread list for both enumeration passes.
     if (!loadToolhelpFunctions())
     {
         SetLastError(ERROR_PROC_NOT_FOUND);
         return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
     }
 
-    HANDLE snapshot = fnCreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, processId);
-    if (!GOOD_HANDLE(snapshot))
-        return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
-
-    THREADENTRY32 entry = {0};
-    entry.dwSize = sizeof(entry);
-
-    // Count peers before allocating storage or suspending any thread.
-    if (!fnThread32First(snapshot, &entry))
-        return cancelThreadSuspension(snapshot, suspension);
-
-    SIZE_T peerCount = 0;
-    do
+    // A running peer can start a thread after the snapshot that listed it, so repeat until a
+    // snapshot finds nothing new. Suspended peers start nothing, so this normally takes two.
+    for (DWORD pass = 0; pass < kMaximumSnapshotPasses; ++pass)
     {
-        if (entry.th32OwnerProcessID == processId && entry.th32ThreadID != currentThreadId)
-            ++peerCount;
+        const SIZE_T suspendedBefore = suspension->count;
 
-        entry.dwSize = sizeof(entry);
-    }
-    while (fnThread32Next(snapshot, &entry));
+        if (!suspendSnapshotThreads(trampolines, trampolineCount, suspension))
+            break;
 
-    if (GetLastError() != ERROR_NO_MORE_FILES)
-        return cancelThreadSuspension(snapshot, suspension);
+        if (suspension->count == suspendedBefore)
+            return MHOOK_STATUS_SUCCESS;
 
-    if (peerCount == 0)
-    {
-        if (!CloseHandle(snapshot))
-            ODPRINTF((L"mhooks: suspendOtherThreads: failed to close the thread snapshot: %d", gle()));
-
-        return MHOOK_STATUS_SUCCESS;
-    }
-
-    // Allocate all handle storage before entering the suspended interval.
-    suspension->handles = malloc(peerCount * sizeof(*suspension->handles));
-    if (!suspension->handles)
-    {
-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        return cancelThreadSuspension(snapshot, suspension);
-    }
-
-    // Suspend every peer represented by the same snapshot.
-    entry.dwSize = sizeof(entry);
-    if (!fnThread32First(snapshot, &entry))
-        return cancelThreadSuspension(snapshot, suspension);
-
-    do
-    {
-        if (entry.th32OwnerProcessID == processId && entry.th32ThreadID != currentThreadId)
-        {
-            if (suspension->count == peerCount)
-            {
-                SetLastError(ERROR_RETRY);
-                return cancelThreadSuspension(snapshot, suspension);
-            }
-
-            HANDLE suspendedHandle = NULL;
-            const BOOL isSuspended =
-                suspendOneThread(entry.th32ThreadID, trampolines, trampolineCount, &suspendedHandle);
-
-            if (GOOD_HANDLE(suspendedHandle))
-            {
-                suspension->handles[suspension->count] = suspendedHandle;
-                ++suspension->count;
-            }
-
-            if (!isSuspended)
-                return cancelThreadSuspension(snapshot, suspension);
-        }
-
-        entry.dwSize = sizeof(entry);
-    }
-    while (fnThread32Next(snapshot, &entry));
-
-    if (GetLastError() != ERROR_NO_MORE_FILES)
-        return cancelThreadSuspension(snapshot, suspension);
-
-    // Require the suspension pass to match the count established before it.
-    if (suspension->count != peerCount)
-    {
+        // Reported only if the thread set never settles within the pass limit.
         SetLastError(ERROR_RETRY);
-        return cancelThreadSuspension(snapshot, suspension);
     }
 
-    // Return only the thread handles needed by the code-modification phase.
-    if (!CloseHandle(snapshot))
-        ODPRINTF((L"mhooks: suspendOtherThreads: failed to close the thread snapshot: %d", gle()));
-
-    return MHOOK_STATUS_SUCCESS;
+    // Release every thread suspended before the failure, keeping the operation's error.
+    const DWORD failureError = GetLastError();
+    resumeOtherThreads(suspension);
+    SetLastError(failureError);
+    return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
 }
 
 //=========================================================================

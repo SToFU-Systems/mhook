@@ -96,6 +96,12 @@ documentation.
   the hook registry twice, one of them while the other thread held it. The lock
   is now a statically initialized slim reader/writer lock, which also makes
   Windows Vista the minimum supported version.
+- A thread started by a peer after the thread snapshot was taken kept running
+  while the target was patched. Snapshots are now repeated until one lists no
+  thread that is not already suspended, which normally takes two; a thread set
+  that has not settled after eight fails with
+  `MHOOK_STATUS_THREAD_SUSPENSION_FAILED`. A thread injected from outside the
+  process can still start after the last snapshot.
 - Function-pointer slots are validated for alignment, readability and
   writability before use.
 - Missing includes and SDK structure packing issues were resolved.
