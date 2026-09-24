@@ -216,8 +216,9 @@ typedef struct ThreadSuspension
 
 //=========================================================================
 // Global vars
-static BOOL g_bVarsInitialized = FALSE;
-static CRITICAL_SECTION g_cs;
+// Statically initialized, so concurrent first calls cannot race to set it up
+// and there is no initialization that could fail or teardown to order.
+static SRWLOCK g_registryLock = SRWLOCK_INIT;
 static MHOOKS_TRAMPOLINE* g_pHooks = NULL;
 static MHOOKS_TRAMPOLINE* g_pFreeList = NULL;
 // GCC ignores __declspec(thread) and says so only in a warning, which would
@@ -304,24 +305,20 @@ static VOID ListPrepend(MHOOKS_TRAMPOLINE** pListHead, MHOOKS_TRAMPOLINE* pNode)
 }
 
 /**
- * @brief Lazily initializes and enters the process-wide critical section guarding the hook registry.
+ * @brief Acquires the process-wide lock guarding the hook registry and trampoline pool.
+ * @remark The lock is not recursive; no path that holds it may acquire it again.
  */
-static VOID EnterCritSec(void)
+static void lockRegistry(void)
 {
-    if (!g_bVarsInitialized)
-    {
-        InitializeCriticalSection(&g_cs);
-        g_bVarsInitialized = TRUE;
-    }
-    EnterCriticalSection(&g_cs);
+    AcquireSRWLockExclusive(&g_registryLock);
 }
 
 /**
- * @brief Leaves the critical section entered by EnterCritSec.
+ * @brief Releases the lock acquired by lockRegistry.
  */
-static VOID LeaveCritSec(void)
+static void unlockRegistry(void)
 {
-    LeaveCriticalSection(&g_cs);
+    ReleaseSRWLockExclusive(&g_registryLock);
 }
 
 /**
@@ -570,7 +567,7 @@ static UnhookResult restoreHookTarget(MHOOKS_TRAMPOLINE* trampoline, DWORD calle
  * @brief Finds an active hook by its resolved target address.
  * @param[in] targetFunction Resolved target address to find.
  * @return The registered trampoline, or NULL when the target is not hooked.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static MHOOKS_TRAMPOLINE* findActiveHookByTarget(PBYTE targetFunction)
 {
@@ -1181,7 +1178,7 @@ static void releaseTrampoline(MHOOKS_TRAMPOLINE* trampoline)
  * @brief Finds the active trampoline whose generated trampoline code starts at a given address.
  * @param[in] pHookedFunction Address previously handed to a caller as a hook's trampoline.
  * @return The matching registered trampoline, or NULL when none matches.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static MHOOKS_TRAMPOLINE* TrampolineGet(PBYTE pHookedFunction)
 {
@@ -1812,7 +1809,7 @@ static MHOOK_STATUS buildHookCode(
  * @param[in] hookFunction Requested replacement function.
  * @param[out] preparedTrampoline Completed private reservation on success, otherwise NULL.
  * @return Success when the hook is ready for installation, otherwise the preparation failure.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static MHOOK_STATUS prepareHook(
     PVOID* systemFunctionSlot,
@@ -1924,7 +1921,7 @@ static BOOL preparedHooksConflict(const MHOOKS_TRAMPOLINE* first, const MHOOKS_T
  * @param[in,out] hooks Requests receiving their preparation status.
  * @param[out] preparedTrampolines Reserved trampoline for each successful request, otherwise NULL.
  * @return The first preparation failure, or SUCCESS when the complete batch is ready.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static MHOOK_STATUS prepareHookBatch(
     SIZE_T hookCount,
@@ -1985,7 +1982,7 @@ static MHOOK_STATUS prepareHookBatch(
  * @brief Returns every unpublished trampoline reservation to the free list.
  * @param[in] hookCount Number of entries in preparedTrampolines.
  * @param[in,out] preparedTrampolines Reservations to release and clear.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static void releasePreparedHooks(SIZE_T hookCount, MHOOKS_TRAMPOLINE** preparedTrampolines)
 {
@@ -2105,7 +2102,7 @@ static MHOOK_STATUS rollbackHookBatch(
  * @param[in] hookCount Number of installed hooks.
  * @param[in,out] hooks Caller descriptors receiving trampoline addresses.
  * @param[in] preparedTrampolines Installed hooks to publish.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static void publishHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, MHOOKS_TRAMPOLINE** preparedTrampolines)
 {
@@ -2198,7 +2195,7 @@ static MHOOK_STATUS installHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks)
     }
 
     // Serialize registry reads, preparation, code changes, and publication.
-    EnterCritSec();
+    lockRegistry();
 
     MHOOK_STATUS status = prepareHookBatch(hookCount, hooks, preparedTrampolines);
 
@@ -2209,7 +2206,7 @@ static MHOOK_STATUS installHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks)
     if (status != MHOOK_STATUS_SUCCESS)
         releasePreparedHooks(hookCount, preparedTrampolines);
 
-    LeaveCritSec();
+    unlockRegistry();
     free(preparedTrampolines);
     return status;
 }
@@ -2260,7 +2257,7 @@ BOOL Mhook_SetHook(PVOID* ppSystemFunction, PVOID pHookFunction)
  * @param[in] callerLastError Error value preserved for validation failures.
  * @param[out] preparedTrampoline Active trampoline ready for removal on success.
  * @return Detailed validation status and corresponding LastError value.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static UnhookResult prepareUnhook(
     PVOID* hookedFunctionSlot,
@@ -2320,7 +2317,7 @@ static UnhookResult prepareUnhook(
  * @param[in,out] hooks Requests receiving their preparation status.
  * @param[out] preparedTrampolines Active trampoline for each successful request, otherwise NULL.
  * @return The first preparation failure, or SUCCESS when the complete batch is ready.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static UnhookResult prepareUnhookBatch(
     SIZE_T hookCount,
@@ -2418,7 +2415,7 @@ static UnhookResult rollbackUnhookBatch(
  * @param[in] preparedTrampolines Complete prepared batch in descriptor order.
  * @param[in,out] hooks Requests receiving commit or rollback failures.
  * @return Detailed transaction status and corresponding LastError value.
- * @remark The caller must hold the hook registry critical section.
+ * @remark The caller must hold the hook registry lock.
  */
 static UnhookResult commitUnhookBatch(
     SIZE_T hookCount,
@@ -2507,14 +2504,14 @@ static UnhookResult removeHookBatch(SIZE_T hookCount, DWORD callerLastError, MHO
     }
 
     // Serialize registry reads, target restoration, and publication.
-    EnterCritSec();
+    lockRegistry();
 
     result = prepareUnhookBatch(hookCount, callerLastError, hooks, preparedTrampolines);
 
     if (result.status == MHOOK_STATUS_SUCCESS)
         result = commitUnhookBatch(hookCount, callerLastError, preparedTrampolines, hooks);
 
-    LeaveCritSec();
+    unlockRegistry();
     free(preparedTrampolines);
     return result;
 }
@@ -2566,10 +2563,10 @@ BOOL Mhook_Unhook(PVOID* ppHookedFunction)
  */
 PVOID Mhook_GetTarget(PVOID pHookedFunction)
 {
-    EnterCritSec();
+    lockRegistry();
     MHOOKS_TRAMPOLINE* pTrampoline = TrampolineGet((PBYTE)pHookedFunction);
     PVOID pTarget = pTrampoline ? (PVOID)pTrampoline->pSystemFunction : NULL;
-    LeaveCritSec();
+    unlockRegistry();
     if (!pTarget)
         SetLastError(MHOOK_ERROR_NOT_HOOKED);
     return pTarget;

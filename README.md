@@ -75,7 +75,7 @@ as a build artifact, so it can be read without building anything locally.
 
 ### Requirements
 
-- Windows, targeting x86 or x64.
+- Windows, targeting x86 or x64. The library runs on Windows Vista or newer.
 - CMake 3.24 or newer, available on `PATH`.
 - Python 3.9 or newer, for `setup.bat`.
 - For MSVC builds: Visual Studio 2022 or Build Tools 2022 with C++ tools and a Windows SDK.

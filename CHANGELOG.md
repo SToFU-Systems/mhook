@@ -92,6 +92,10 @@ documentation.
 - Targets are validated as live and executable before unhooking.
 - A failure to suspend a thread now aborts the operation rather than letting it
   proceed with threads possibly executing the code being patched.
+- Concurrent first calls into the library could initialize the lock guarding
+  the hook registry twice, one of them while the other thread held it. The lock
+  is now a statically initialized slim reader/writer lock, which also makes
+  Windows Vista the minimum supported version.
 - Function-pointer slots are validated for alignment, readability and
   writability before use.
 - Missing includes and SDK structure packing issues were resolved.
