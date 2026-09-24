@@ -128,6 +128,7 @@ set(hookCases
     short_func
     threads
     suspend_failure
+    first_use_race
     reuse
     sweep
 )

@@ -1322,6 +1322,132 @@ static int caseSuspensionFailure(void)
     return 0;
 }
 
+/**
+ * @brief Shared state for workers racing to make the first hook calls in the process.
+ */
+struct FirstUseRace
+{
+    HANDLE start;
+    HANDLE allDone;
+    HANDLE finish;
+    volatile LONG* pending;
+    PBYTE target;
+    BOOL hooked;
+    BOOL called;
+    BOOL unhooked;
+};
+
+/**
+ * @brief Installs, calls, and removes a hook on the worker's own target once released.
+ * @param[in,out] parameter The worker's FirstUseRace entry.
+ * @return Zero after the finish event is signalled.
+ */
+static DWORD WINAPI raceFirstUse(LPVOID parameter)
+{
+    FirstUseRace* race = static_cast<FirstUseRace*>(parameter);
+    PVOID trampoline = race->target;
+
+    WaitForSingleObject(race->start, INFINITE);
+
+    race->hooked = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+    if (race->hooked)
+    {
+        race->called = reinterpret_cast<int (*)(void)>(race->target)() == HOOK_RESULT;
+        race->unhooked = Mhook_Unhook(&trampoline) && trampoline == race->target;
+    }
+
+    if (InterlockedDecrement(race->pending) == 0)
+        SetEvent(race->allDone);
+
+    // Stay alive until every worker is done, so a peer never exits while another
+    // worker's operation is suspending it.
+    WaitForSingleObject(race->finish, INFINITE);
+    return 0;
+}
+
+/**
+ * @brief Verifies that concurrent first calls into a fresh process share one registry lock.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseFirstUseRace(void)
+{
+    const SIZE_T kWorkerCount = 8;
+
+    HANDLE start = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE allDone = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE finish = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!start || !allDone || !finish)
+        return Fail("CreateEvent for the first use race failed");
+
+    volatile LONG pending = (LONG)kWorkerCount;
+
+    FirstUseRace races[kWorkerCount] = {};
+    HANDLE threads[kWorkerCount] = {};
+    SIZE_T createdThreadCount = 0;
+    const char* failure = NULL;
+
+    for (; createdThreadCount < kWorkerCount; ++createdThreadCount)
+    {
+        FirstUseRace* race = &races[createdThreadCount];
+        race->start = start;
+        race->allDone = allDone;
+        race->finish = finish;
+        race->pending = &pending;
+        race->target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+        if (!race->target)
+        {
+            failure = "VirtualAlloc for a first use race target failed";
+            break;
+        }
+
+        threads[createdThreadCount] = CreateThread(NULL, 0, raceFirstUse, race, 0, NULL);
+        if (!threads[createdThreadCount])
+        {
+            failure = "CreateThread for the first use race failed";
+            break;
+        }
+    }
+
+    // Release every worker at once so their first library calls overlap, and
+    // let none exit before all have finished.
+    SetEvent(start);
+    if (!failure)
+        WaitForSingleObject(allDone, INFINITE);
+    SetEvent(finish);
+    if (createdThreadCount != 0)
+        WaitForMultipleObjects((DWORD)createdThreadCount, threads, TRUE, INFINITE);
+
+    for (SIZE_T index = 0; index < createdThreadCount; ++index)
+    {
+        const FirstUseRace* race = &races[index];
+        if (failure)
+            break;
+        if (!race->hooked)
+            failure = "a concurrent first Mhook_SetHook failed";
+        else if (!race->called)
+            failure = "a concurrently installed hook did not redirect its target";
+        else if (!race->unhooked)
+            failure = "a concurrent Mhook_Unhook failed";
+        else if (memcmp(race->target, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "a concurrent Mhook_Unhook did not restore its target";
+    }
+
+    for (SIZE_T index = 0; index < createdThreadCount; ++index)
+        CloseHandle(threads[index]);
+    for (SIZE_T index = 0; index < kWorkerCount; ++index)
+    {
+        if (races[index].target)
+            VirtualFree(races[index].target, 0, MEM_RELEASE);
+    }
+    CloseHandle(start);
+    CloseHandle(allDone);
+    CloseHandle(finish);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
 static int CaseReuse(void)
 {
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
@@ -1612,6 +1738,7 @@ static const TestCase kCases[] = {
     {"short_func", CaseShortFunc},
     {"threads", CaseThreads},
     {"suspend_failure", caseSuspensionFailure},
+    {"first_use_race", caseFirstUseRace},
     {"reuse", CaseReuse},
 #ifdef _M_X64
     {"pool", caseTrampolinePoolBookkeeping},
