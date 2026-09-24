@@ -258,20 +258,6 @@ enum
 static const SIZE_T kMaximumRelativeJumpDistance = 0x7fff0000;
 
 //=========================================================================
-// Toolhelp defintions so the functions can be dynamically bound to
-typedef HANDLE(WINAPI* _CreateToolhelp32Snapshot)(DWORD dwFlags, DWORD th32ProcessID);
-
-typedef BOOL(WINAPI* _Thread32First)(HANDLE hSnapshot, LPTHREADENTRY32 lpte);
-
-typedef BOOL(WINAPI* _Thread32Next)(HANDLE hSnapshot, LPTHREADENTRY32 lpte);
-
-//=========================================================================
-// Toolhelp functions are resolved before thread enumeration.
-static _CreateToolhelp32Snapshot fnCreateToolhelp32Snapshot = NULL;
-static _Thread32First fnThread32First = NULL;
-static _Thread32Next fnThread32Next = NULL;
-
-//=========================================================================
 /**
  * @brief Unlinks a trampoline from a doubly linked list, updating the head pointer if necessary.
  * @param[in,out] pListHead List head to update when pNode is the current head.
@@ -331,28 +317,6 @@ static void lockRegistry(void)
 static void unlockRegistry(void)
 {
     ReleaseSRWLockExclusive(&g_registryLock);
-}
-
-/**
- * @brief Loads the Toolhelp functions required for thread enumeration.
- * @return TRUE when every required function is available.
- */
-static BOOL loadToolhelpFunctions(void)
-{
-    if (fnCreateToolhelp32Snapshot && fnThread32First && fnThread32Next)
-        return TRUE;
-
-    HMODULE kernel32Module = GetModuleHandleW(L"kernel32");
-
-    if (!kernel32Module)
-        return FALSE;
-
-    fnCreateToolhelp32Snapshot =
-        (_CreateToolhelp32Snapshot)(void (*)(void))GetProcAddress(kernel32Module, "CreateToolhelp32Snapshot");
-    fnThread32First = (_Thread32First)(void (*)(void))GetProcAddress(kernel32Module, "Thread32First");
-    fnThread32Next = (_Thread32Next)(void (*)(void))GetProcAddress(kernel32Module, "Thread32Next");
-
-    return fnCreateToolhelp32Snapshot && fnThread32First && fnThread32Next;
 }
 
 /**
@@ -1225,10 +1189,14 @@ static void retireTrampoline(MHOOKS_TRAMPOLINE* trampoline)
 /**
  * @brief Releases every peer-thread suspension owned by one transaction.
  * @param[in,out] suspension Owned threads to resume, close, and discard.
+ * @return SUCCESS, or THREAD_RESUME_FAILED with the error of the first thread that could not be resumed.
  */
-static void resumeOtherThreads(ThreadSuspension* suspension)
+static MHOOK_STATUS resumeOtherThreads(ThreadSuspension* suspension)
 {
     assert(suspension);
+
+    MHOOK_STATUS status = MHOOK_STATUS_SUCCESS;
+    DWORD resumeError = ERROR_SUCCESS;
 
     // Attempt every release even when an earlier thread cannot be resumed.
     for (SIZE_T index = 0; index < suspension->count; ++index)
@@ -1236,8 +1204,11 @@ static void resumeOtherThreads(ThreadSuspension* suspension)
         HANDLE handle = suspension->threads[index].handle;
         assert(GOOD_HANDLE(handle));
 
-        if (ResumeThread(handle) == (DWORD)-1)
-            ODPRINTF((L"mhooks: resumeOtherThreads: failed to resume a peer thread: %d", gle()));
+        if (ResumeThread(handle) == (DWORD)-1 && status == MHOOK_STATUS_SUCCESS)
+        {
+            status = MHOOK_STATUS_THREAD_RESUME_FAILED;
+            resumeError = GetLastError();
+        }
 
         if (!CloseHandle(handle))
             ODPRINTF((L"mhooks: resumeOtherThreads: failed to close a peer thread handle: %d", gle()));
@@ -1250,6 +1221,11 @@ static void resumeOtherThreads(ThreadSuspension* suspension)
     suspension->threads = NULL;
     suspension->count = 0;
     suspension->capacity = 0;
+
+    if (status != MHOOK_STATUS_SUCCESS)
+        SetLastError(resumeError);
+
+    return status;
 }
 
 /**
@@ -1306,14 +1282,63 @@ static BOOL reserveSuspendedThread(ThreadSuspension* suspension)
 }
 
 /**
+ * @brief Classifies a peer that SuspendThread refused although its handle holds the right to suspend it.
+ * @param[in] threadId Peer whose suspension failed.
+ * @param[in] suspendError Error reported by SuspendThread.
+ * @return SUCCESS when the peer has exited and needs no suspension, THREAD_BUSY while it is still
+ *         exiting, otherwise THREAD_SUSPENSION_FAILED.
+ * @remark SuspendThread refuses a terminating thread with ERROR_ACCESS_DENIED, the error a missing
+ *         access right would give. The handle holds that right, so the thread is checked for exit.
+ */
+static MHOOK_STATUS classifySuspendFailure(DWORD threadId, DWORD suspendError)
+{
+    const DWORD kExitWaitMilliseconds = 100;
+
+    if (suspendError != ERROR_ACCESS_DENIED)
+    {
+        SetLastError(suspendError);
+        return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
+    }
+
+    // Only a thread that has finished exiting is known to run no more code.
+    HANDLE handle = OpenThread(SYNCHRONIZE, FALSE, threadId);
+    if (!GOOD_HANDLE(handle))
+    {
+        if (GetLastError() == ERROR_INVALID_PARAMETER)
+            return MHOOK_STATUS_SUCCESS;
+
+        SetLastError(suspendError);
+        return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
+    }
+
+    const DWORD waitResult = WaitForSingleObject(handle, kExitWaitMilliseconds);
+
+    if (!CloseHandle(handle))
+        ODPRINTF((L"mhooks: classifySuspendFailure: failed to close thread %d: %d", threadId, gle()));
+
+    if (waitResult == WAIT_OBJECT_0)
+        return MHOOK_STATUS_SUCCESS;
+
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        SetLastError(ERROR_RETRY);
+        return MHOOK_STATUS_THREAD_BUSY;
+    }
+
+    SetLastError(suspendError);
+    return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
+}
+
+/**
  * @brief Suspends one peer outside every pending code range.
  * @param[in] threadId Identifier of the peer thread to suspend.
  * @param[in] trampolines Prepared or active hooks whose target bytes will be modified.
  * @param[in] trampolineCount Number of entries in trampolines.
  * @param[out] suspendedHandle Owned suspended handle, or NULL when no suspension remains.
- * @return TRUE when the thread is suspended at a safe instruction pointer.
+ * @return SUCCESS when the peer is suspended at a safe instruction pointer, or has exited since the
+ *         snapshot and needs no suspension, leaving suspendedHandle NULL. Otherwise the thread failure.
  */
-static BOOL suspendOneThread(
+static MHOOK_STATUS suspendOneThread(
     DWORD threadId,
     MHOOKS_TRAMPOLINE** trampolines,
     SIZE_T trampolineCount,
@@ -1329,32 +1354,41 @@ static BOOL suspendOneThread(
 
     *suspendedHandle = NULL;
 
-    // Open and suspend the peer before inspecting its instruction pointer.
     HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, threadId);
     if (!GOOD_HANDLE(handle))
-        return FALSE;
-
-    if (SuspendThread(handle) == (DWORD)-1)
     {
-        const DWORD failureError = GetLastError();
+        const DWORD openError = GetLastError();
 
-        if (!CloseHandle(handle))
-            ODPRINTF((L"mhooks: suspendOneThread: failed to close thread %d: %d", threadId, gle()));
+        // The thread exited, and its object is gone, after the snapshot listed it.
+        if (openError == ERROR_INVALID_PARAMETER)
+            return MHOOK_STATUS_SUCCESS;
 
-        SetLastError(failureError);
-        return FALSE;
+        return openError == ERROR_ACCESS_DENIED ? MHOOK_STATUS_THREAD_ACCESS_DENIED
+                                                : MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
     }
 
-    *suspendedHandle = handle;
-
     // Retry when the peer stops inside bytes that the operation will modify.
-    for (DWORD retry = 0; retry <= kMaximumInstructionPointerRetries; ++retry)
+    for (DWORD retry = 0;; ++retry)
     {
+        if (SuspendThread(handle) == (DWORD)-1)
+        {
+            const MHOOK_STATUS status = classifySuspendFailure(threadId, GetLastError());
+            const DWORD failureError = GetLastError();
+
+            if (!CloseHandle(handle))
+                ODPRINTF((L"mhooks: suspendOneThread: failed to close thread %d: %d", threadId, gle()));
+
+            SetLastError(failureError);
+            return status;
+        }
+
+        *suspendedHandle = handle;
+
         CONTEXT context = {0};
         context.ContextFlags = CONTEXT_CONTROL;
 
         if (!GetThreadContext(handle, &context))
-            return FALSE;
+            return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
 
         PBYTE instructionPointer = NULL;
 
@@ -1381,37 +1415,21 @@ static BOOL suspendOneThread(
         }
 
         if (!isColliding)
-            return TRUE;
+            return MHOOK_STATUS_SUCCESS;
 
         if (retry == kMaximumInstructionPointerRetries)
         {
             SetLastError(ERROR_RETRY);
-            return FALSE;
+            return MHOOK_STATUS_THREAD_BUSY;
         }
 
         // Release only this transaction's suspension while the instruction pointer moves.
         if (ResumeThread(handle) == (DWORD)-1)
-            return FALSE;
+            return MHOOK_STATUS_THREAD_RESUME_FAILED;
 
         *suspendedHandle = NULL;
         Sleep(100);
-
-        if (SuspendThread(handle) == (DWORD)-1)
-        {
-            const DWORD failureError = GetLastError();
-
-            if (!CloseHandle(handle))
-                ODPRINTF((L"mhooks: suspendOneThread: failed to close thread %d: %d", threadId, gle()));
-
-            SetLastError(failureError);
-            return FALSE;
-        }
-
-        *suspendedHandle = handle;
     }
-
-    SetLastError(ERROR_RETRY);
-    return FALSE;
 }
 
 /**
@@ -1419,9 +1437,9 @@ static BOOL suspendOneThread(
  * @param[in] trampolines Prepared or active hooks whose target bytes will be changed.
  * @param[in] trampolineCount Number of entries in trampolines.
  * @param[in,out] suspension Threads suspended so far, extended with the newly suspended ones.
- * @return TRUE when every newly listed peer is suspended at a safe instruction pointer.
+ * @return SUCCESS when every newly listed peer is suspended at a safe instruction pointer or has exited.
  */
-static BOOL suspendSnapshotThreads(
+static MHOOK_STATUS suspendSnapshotThreads(
     MHOOKS_TRAMPOLINE** trampolines,
     SIZE_T trampolineCount,
     ThreadSuspension* suspension
@@ -1434,15 +1452,17 @@ static BOOL suspendSnapshotThreads(
     const DWORD processId = GetCurrentProcessId();
     const DWORD currentThreadId = GetCurrentThreadId();
 
-    HANDLE snapshot = fnCreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, processId);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, processId);
     if (!GOOD_HANDLE(snapshot))
-        return FALSE;
+        return MHOOK_STATUS_THREAD_ENUMERATION_FAILED;
 
     THREADENTRY32 entry = {0};
     entry.dwSize = sizeof(entry);
 
-    BOOL isComplete = fnThread32First(snapshot, &entry);
-    while (isComplete)
+    MHOOK_STATUS status =
+        Thread32First(snapshot, &entry) ? MHOOK_STATUS_SUCCESS : MHOOK_STATUS_THREAD_ENUMERATION_FAILED;
+
+    while (status == MHOOK_STATUS_SUCCESS)
     {
         const BOOL isNewPeer = entry.th32OwnerProcessID == processId && entry.th32ThreadID != currentThreadId &&
                                !isThreadSuspended(suspension, entry.th32ThreadID);
@@ -1452,13 +1472,12 @@ static BOOL suspendSnapshotThreads(
             if (!reserveSuspendedThread(suspension))
             {
                 SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                isComplete = FALSE;
+                status = MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
                 break;
             }
 
             HANDLE suspendedHandle = NULL;
-            const BOOL isSuspended =
-                suspendOneThread(entry.th32ThreadID, trampolines, trampolineCount, &suspendedHandle);
+            status = suspendOneThread(entry.th32ThreadID, trampolines, trampolineCount, &suspendedHandle);
 
             if (GOOD_HANDLE(suspendedHandle))
             {
@@ -1467,17 +1486,15 @@ static BOOL suspendSnapshotThreads(
                 ++suspension->count;
             }
 
-            if (!isSuspended)
-            {
-                isComplete = FALSE;
+            if (status != MHOOK_STATUS_SUCCESS)
                 break;
-            }
         }
 
         entry.dwSize = sizeof(entry);
-        if (!fnThread32Next(snapshot, &entry))
+        if (!Thread32Next(snapshot, &entry))
         {
-            isComplete = GetLastError() == ERROR_NO_MORE_FILES;
+            if (GetLastError() != ERROR_NO_MORE_FILES)
+                status = MHOOK_STATUS_THREAD_ENUMERATION_FAILED;
             break;
         }
     }
@@ -1488,7 +1505,7 @@ static BOOL suspendSnapshotThreads(
         ODPRINTF((L"mhooks: suspendSnapshotThreads: failed to close the thread snapshot: %d", gle()));
 
     SetLastError(lastError);
-    return isComplete;
+    return status;
 }
 
 /**
@@ -1496,7 +1513,8 @@ static BOOL suspendSnapshotThreads(
  * @param[in] trampolines Prepared or active hooks whose target bytes will be changed.
  * @param[in] trampolineCount Number of entries in trampolines.
  * @param[out] suspension Owned suspension context to release after code modification.
- * @return Success once a snapshot lists no peer that is not already suspended at a safe instruction pointer.
+ * @return SUCCESS once a snapshot lists no peer that is not already suspended at a safe instruction
+ *         pointer. Otherwise the thread failure, with every peer already suspended released again.
  * @remark A thread started from outside the process, by CreateRemoteThread or by the kernel, can
  *         still appear after the final snapshot. Only the process's own threads are held.
  */
@@ -1516,11 +1534,7 @@ static MHOOK_STATUS suspendOtherThreads(
     suspension->count = 0;
     suspension->capacity = 0;
 
-    if (!loadToolhelpFunctions())
-    {
-        SetLastError(ERROR_PROC_NOT_FOUND);
-        return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
-    }
+    MHOOK_STATUS status = MHOOK_STATUS_THREAD_BUSY;
 
     // A running peer can start a thread after the snapshot that listed it, so repeat until a
     // snapshot finds nothing new. Suspended peers start nothing, so this normally takes two.
@@ -1528,21 +1542,25 @@ static MHOOK_STATUS suspendOtherThreads(
     {
         const SIZE_T suspendedBefore = suspension->count;
 
-        if (!suspendSnapshotThreads(trampolines, trampolineCount, suspension))
+        status = suspendSnapshotThreads(trampolines, trampolineCount, suspension);
+        if (status != MHOOK_STATUS_SUCCESS)
             break;
 
         if (suspension->count == suspendedBefore)
             return MHOOK_STATUS_SUCCESS;
 
         // Reported only if the thread set never settles within the pass limit.
+        status = MHOOK_STATUS_THREAD_BUSY;
         SetLastError(ERROR_RETRY);
     }
 
-    // Release every thread suspended before the failure, keeping the operation's error.
+    // A peer left suspended outweighs the failure that ended the suspension.
     const DWORD failureError = GetLastError();
-    resumeOtherThreads(suspension);
+    if (resumeOtherThreads(suspension) != MHOOK_STATUS_SUCCESS)
+        return MHOOK_STATUS_THREAD_RESUME_FAILED;
+
     SetLastError(failureError);
-    return MHOOK_STATUS_THREAD_SUSPENSION_FAILED;
+    return status;
 }
 
 //=========================================================================
@@ -2177,9 +2195,15 @@ static void publishHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, MHOOKS_TR
  * @param[in] hookCount Number of prepared hooks.
  * @param[in,out] hooks Requests receiving commit or rollback failures.
  * @param[in,out] preparedTrampolines Complete prepared batch, cleared when rollback cannot restore an entry.
+ * @param[out] resumeStatus THREAD_RESUME_FAILED when a peer could not be resumed after the commit or rollback.
  * @return SUCCESS when every hook is installed and published, otherwise the transaction failure.
  */
-static MHOOK_STATUS commitHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, MHOOKS_TRAMPOLINE** preparedTrampolines)
+static MHOOK_STATUS commitHookBatch(
+    SIZE_T hookCount,
+    MHOOK_HOOK_INFO* hooks,
+    MHOOKS_TRAMPOLINE** preparedTrampolines,
+    OUT MHOOK_STATUS* resumeStatus
+)
 {
     assert(hookCount);
     assert(hooks);
@@ -2222,7 +2246,7 @@ static MHOOK_STATUS commitHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, MH
     }
 
     // Resume peers only after publication or rollback has completed.
-    resumeOtherThreads(&suspension);
+    *resumeStatus = resumeOtherThreads(&suspension);
     return status;
 }
 
@@ -2230,9 +2254,10 @@ static MHOOK_STATUS commitHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, MH
  * @brief Owns preparation, commit, and cleanup for one atomic installation batch.
  * @param[in] hookCount Number of validated descriptors.
  * @param[in,out] hooks Requests receiving per-hook results and trampolines on success.
+ * @param[out] resumeStatus THREAD_RESUME_FAILED when a peer could not be resumed after the commit or rollback.
  * @return SUCCESS when the whole batch is installed, otherwise the transaction failure.
  */
-static MHOOK_STATUS installHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks)
+static MHOOK_STATUS installHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks, OUT MHOOK_STATUS* resumeStatus)
 {
     assert(hookCount);
     assert(hooks);
@@ -2254,7 +2279,7 @@ static MHOOK_STATUS installHookBatch(SIZE_T hookCount, MHOOK_HOOK_INFO* hooks)
     MHOOK_STATUS status = prepareHookBatch(hookCount, hooks, preparedTrampolines);
 
     if (status == MHOOK_STATUS_SUCCESS)
-        status = commitHookBatch(hookCount, hooks, preparedTrampolines);
+        status = commitHookBatch(hookCount, hooks, preparedTrampolines, resumeStatus);
 
     // commitHookBatch can fail
     if (status != MHOOK_STATUS_SUCCESS)
@@ -2284,10 +2309,11 @@ BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
         return FALSE;
     }
 
-    const MHOOK_STATUS status = installHookBatch(hookCount, hooks);
+    MHOOK_STATUS resumeStatus = MHOOK_STATUS_SUCCESS;
+    const MHOOK_STATUS status = installHookBatch(hookCount, hooks, &resumeStatus);
 
-    // Preserve the set API's LastError contract while publishing the overall status.
-    g_lastStatus = status;
+    // A peer left suspended is reported even over a completed installation, which stays in place.
+    g_lastStatus = resumeStatus != MHOOK_STATUS_SUCCESS ? resumeStatus : status;
     SetLastError(callerLastError);
     return status == MHOOK_STATUS_SUCCESS;
 }
@@ -2468,6 +2494,7 @@ static UnhookResult rollbackUnhookBatch(
  * @param[in] callerLastError Error value preserved when the transaction succeeds.
  * @param[in] preparedTrampolines Complete prepared batch in descriptor order.
  * @param[in,out] hooks Requests receiving commit or rollback failures.
+ * @param[out] resumeStatus THREAD_RESUME_FAILED when a peer could not be resumed after the commit or rollback.
  * @return Detailed transaction status and corresponding LastError value.
  * @remark The caller must hold the hook registry lock.
  */
@@ -2475,7 +2502,8 @@ static UnhookResult commitUnhookBatch(
     SIZE_T hookCount,
     DWORD callerLastError,
     MHOOKS_TRAMPOLINE** preparedTrampolines,
-    MHOOK_HOOK_INFO* hooks
+    MHOOK_HOOK_INFO* hooks,
+    OUT MHOOK_STATUS* resumeStatus
 )
 {
     assert(hookCount);
@@ -2528,7 +2556,7 @@ static UnhookResult commitUnhookBatch(
     }
 
     // Resume peers only after publication or rollback has completed.
-    resumeOtherThreads(&suspension);
+    *resumeStatus = resumeOtherThreads(&suspension);
     return result;
 }
 
@@ -2537,9 +2565,15 @@ static UnhookResult commitUnhookBatch(
  * @param[in] hookCount Number of validated descriptors.
  * @param[in] callerLastError Error value preserved when the transaction succeeds.
  * @param[in,out] hooks Requests receiving per-hook results and restored targets.
+ * @param[out] resumeStatus THREAD_RESUME_FAILED when a peer could not be resumed after the commit or rollback.
  * @return Detailed transaction status and corresponding LastError value.
  */
-static UnhookResult removeHookBatch(SIZE_T hookCount, DWORD callerLastError, MHOOK_HOOK_INFO* hooks)
+static UnhookResult removeHookBatch(
+    SIZE_T hookCount,
+    DWORD callerLastError,
+    MHOOK_HOOK_INFO* hooks,
+    OUT MHOOK_STATUS* resumeStatus
+)
 {
     assert(hookCount);
     assert(hooks);
@@ -2563,7 +2597,7 @@ static UnhookResult removeHookBatch(SIZE_T hookCount, DWORD callerLastError, MHO
     result = prepareUnhookBatch(hookCount, callerLastError, hooks, preparedTrampolines);
 
     if (result.status == MHOOK_STATUS_SUCCESS)
-        result = commitUnhookBatch(hookCount, callerLastError, preparedTrampolines, hooks);
+        result = commitUnhookBatch(hookCount, callerLastError, preparedTrampolines, hooks, resumeStatus);
 
     unlockRegistry();
     free(preparedTrampolines);
@@ -2589,10 +2623,11 @@ BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount)
         return FALSE;
     }
 
-    const UnhookResult result = removeHookBatch(hookCount, callerLastError, hooks);
+    MHOOK_STATUS resumeStatus = MHOOK_STATUS_SUCCESS;
+    const UnhookResult result = removeHookBatch(hookCount, callerLastError, hooks, &resumeStatus);
 
-    // Publish the overall result after all serialized cleanup is complete.
-    g_lastStatus = result.status;
+    // A peer left suspended is reported even over a completed removal, which stays in place.
+    g_lastStatus = resumeStatus != MHOOK_STATUS_SUCCESS ? resumeStatus : result.status;
     SetLastError(result.status == MHOOK_STATUS_SUCCESS ? callerLastError : result.lastError);
     return result.status == MHOOK_STATUS_SUCCESS;
 }

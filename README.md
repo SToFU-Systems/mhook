@@ -40,7 +40,7 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED` | No suitable trampoline could be allocated. | Retry only if memory availability may have changed. |
 | `MHOOK_STATUS_MEMORY_PROTECTION_FAILED` | A required memory-protection change failed. | Stop the operation and retry only if process conditions may have changed. |
 | `MHOOK_STATUS_HOOK_NOT_FOUND` | The supplied pointer does not identify an active hook. | Correct the hook lifecycle or pointer before retrying. |
-| `MHOOK_STATUS_THREAD_SUSPENSION_FAILED` | Required thread coordination failed. | Stop changing hooks and retry only if thread conditions may have changed. |
+| `MHOOK_STATUS_THREAD_SUSPENSION_FAILED` | A peer thread could not be suspended or inspected, or the list of suspended threads could not grow. | Stop changing hooks and retry only if thread conditions may have changed. |
 | `MHOOK_STATUS_PATCH_FAILED` | Publishing modified code failed. | Treat the hook state as uncertain and stop further hook changes. |
 | `MHOOK_STATUS_TARGET_MODIFIED` | Another writer modified the target after the hook was installed. | Leave the hook installed and retry only after Mhook's patch has been restored. |
 | `MHOOK_STATUS_INVALID_DESCRIPTOR` | The supplied function-pointer slot is misaligned, unreadable, or unwritable. | Pass an aligned pointer to readable and writable `PVOID` storage. |
@@ -48,6 +48,10 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_JUMP_CYCLE` | Entry-point jump resolution encountered an address it had already visited. | Correct the cyclic thunk chain before retrying. |
 | `MHOOK_STATUS_JUMP_DEPTH_EXCEEDED` | Entry-point jump resolution would follow more than 16 jumps. | Shorten the thunk chain before retrying. |
 | `MHOOK_STATUS_ALREADY_HOOKED` | Either the requested target or replacement resolution chain reached a target with an active hook. | Reuse or remove the existing hook before retrying. |
+| `MHOOK_STATUS_THREAD_ENUMERATION_FAILED` | The process's threads could not be listed. | Stop changing hooks and retry only if process conditions may have changed. |
+| `MHOOK_STATUS_THREAD_ACCESS_DENIED` | A peer thread refused the suspend, resume and get-context rights Mhook needs. | Do not retry; the process's thread security does not permit hooking. |
+| `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
+| `MHOOK_STATUS_THREAD_RESUME_FAILED` | A suspended peer could not be resumed and may stay suspended. Reported over any other status, even when the operation returned `TRUE` and its hooks are in place. | Treat the process as possibly deadlocked and stop further hook changes. |
 
 ## Documentation
 
