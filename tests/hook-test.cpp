@@ -1129,7 +1129,7 @@ static int CaseThreads(void)
         for (int attempt = 0; attempt < kOperationRetryCount && !hookResult; ++attempt)
         {
             hookResult = Mhook_SetHook(&trampoline, (PVOID)&HookCounting);
-            if (!hookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            if (!hookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
                 status = Fail("Mhook_SetHook failed unexpectedly while other threads were running");
             else if (!hookResult && trampoline != target)
                 status = Fail("a suspended-thread collision changed the caller slot");
@@ -1150,7 +1150,7 @@ static int CaseThreads(void)
         for (int attempt = 0; attempt < kOperationRetryCount && !unhookResult; ++attempt)
         {
             unhookResult = Mhook_Unhook(&trampoline);
-            if (!unhookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+            if (!unhookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
                 status = Fail("Mhook_Unhook failed unexpectedly while other threads were running");
             else if (!unhookResult && trampoline == target)
                 status = Fail("a suspended-thread collision published a failed unhook");
@@ -1255,7 +1255,7 @@ static int caseSuspensionFailure(void)
 
         if (hookResult)
             failure = "Mhook_SetHook succeeded when a peer thread could not be opened";
-        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_ACCESS_DENIED)
             failure = "Mhook_SetHook reported the wrong suspension failure status";
         else if (trampoline != target)
             failure = "the failed Mhook_SetHook changed the caller slot";
@@ -1297,7 +1297,7 @@ static int caseSuspensionFailure(void)
         const BOOL unhookResult = Mhook_Unhook(&trampoline);
         if (unhookResult)
             failure = "Mhook_Unhook succeeded when a peer thread could not be opened";
-        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_SUSPENSION_FAILED)
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_ACCESS_DENIED)
             failure = "Mhook_Unhook reported the wrong suspension failure status";
         else if (trampoline == target)
             failure = "the failed Mhook_Unhook changed the caller slot";
@@ -1449,34 +1449,75 @@ static int caseFirstUseRace(void)
 }
 
 typedef HANDLE(WINAPI* SnapshotFunction)(DWORD flags, DWORD processId);
+typedef HANDLE (*SnapshotObserver)(DWORD call, DWORD flags, DWORD processId);
 
 static SnapshotFunction g_originalSnapshot = NULL;
-static BOOL g_snapshotArmed = FALSE;
+static SnapshotObserver g_snapshotObserver = NULL;
 static DWORD g_snapshotCalls = 0;
+
+/**
+ * @brief Hands each thread snapshot the engine takes to the active observer, if any.
+ * @param[in] flags Snapshot flags.
+ * @param[in] processId Process to snapshot.
+ * @return The observer's snapshot, or the original function's when no observer is active.
+ */
+static HANDLE WINAPI observeSnapshot(DWORD flags, DWORD processId)
+{
+    const SnapshotObserver observer = g_snapshotObserver;
+    if (!observer)
+        return g_originalSnapshot(flags, processId);
+
+    return observer(++g_snapshotCalls, flags, processId);
+}
+
+/**
+ * @brief Routes every CreateToolhelp32Snapshot call in the process through observeSnapshot.
+ * @return TRUE when the hook is installed.
+ */
+static BOOL hookSnapshots(void)
+{
+    g_originalSnapshot = reinterpret_cast<SnapshotFunction>(
+        reinterpret_cast<void (*)(void)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CreateToolhelp32Snapshot"))
+    );
+
+    // The slot is published before peers resume, so a resumed call already reaches the trampoline.
+    return g_originalSnapshot &&
+           Mhook_SetHook(reinterpret_cast<PVOID*>(&g_originalSnapshot), reinterpret_cast<PVOID>(&observeSnapshot));
+}
+
+/**
+ * @brief Runs one hook installation with an observer watching the engine's snapshots.
+ * @param[in] observer Observer active for the duration of the call.
+ * @param[in,out] slot Hook slot passed to Mhook_SetHook.
+ * @return The Mhook_SetHook result.
+ */
+static BOOL setHookObserved(SnapshotObserver observer, PVOID* slot)
+{
+    g_snapshotCalls = 0;
+    g_snapshotObserver = observer;
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookCounting));
+    g_snapshotObserver = NULL;
+    return result;
+}
+
 static HANDLE g_lateThread = NULL;
 static BOOL g_lateThreadSeenSuspended = FALSE;
 
 /**
- * @brief Starts a thread just after the library's first snapshot, then watches whether it is held.
- * @param[in] flags Snapshot flags forwarded to the original function.
- * @param[in] processId Process forwarded to the original function.
- * @return The snapshot taken by the original function.
+ * @brief Starts a thread just after the engine's first snapshot, then watches whether it is held.
  */
-static HANDLE WINAPI snapshotStartingLateThread(DWORD flags, DWORD processId)
+static HANDLE startLateThread(DWORD call, DWORD flags, DWORD processId)
 {
     HANDLE snapshot = g_originalSnapshot(flags, processId);
-    if (!g_snapshotArmed)
-        return snapshot;
 
-    ++g_snapshotCalls;
-    if (g_snapshotCalls == 1)
+    if (call == 1)
     {
         // Nothing is suspended yet, and this snapshot cannot list the new thread.
         g_lateThread = CreateThread(NULL, 0, waitForStop, NULL, 0, NULL);
     }
     else if (g_lateThread)
     {
-        // A later snapshot that finds the thread already suspended proves the library went back for it.
+        // A later snapshot that finds the thread already suspended proves the engine went back for it.
         const DWORD previousSuspendCount = SuspendThread(g_lateThread);
         if (previousSuspendCount != (DWORD)-1)
         {
@@ -1495,16 +1536,8 @@ static HANDLE WINAPI snapshotStartingLateThread(DWORD flags, DWORD processId)
  */
 static int caseLateThread(void)
 {
-    g_originalSnapshot = reinterpret_cast<SnapshotFunction>(
-        reinterpret_cast<void (*)(void)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CreateToolhelp32Snapshot"))
-    );
-    if (!g_originalSnapshot)
-        return Fail("CreateToolhelp32Snapshot could not be resolved");
-
-    PVOID snapshotTrampoline = reinterpret_cast<PVOID>(g_originalSnapshot);
-    if (!Mhook_SetHook(&snapshotTrampoline, reinterpret_cast<PVOID>(&snapshotStartingLateThread)))
+    if (!hookSnapshots())
         return Fail("hooking CreateToolhelp32Snapshot failed");
-    g_originalSnapshot = reinterpret_cast<SnapshotFunction>(snapshotTrampoline);
 
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
     const char* failure = target ? NULL : "VirtualAlloc for the late thread target failed";
@@ -1513,11 +1546,7 @@ static int caseLateThread(void)
     PVOID trampoline = target;
     if (!failure)
     {
-        g_snapshotArmed = TRUE;
-        const BOOL hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
-        g_snapshotArmed = FALSE;
-
-        if (!hookResult)
+        if (!setHookObserved(startLateThread, &trampoline))
             failure = "Mhook_SetHook failed while a thread started during suspension";
         else if (!g_lateThread)
             failure = "CreateThread for the late thread failed";
@@ -1536,8 +1565,429 @@ static int caseLateThread(void)
 
     if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
         failure = "removing the target hook failed";
-    if (!Mhook_Unhook(&snapshotTrampoline) && !failure)
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalSnapshot)) && !failure)
         failure = "removing the CreateToolhelp32Snapshot hook failed";
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+static const SIZE_T kChurnThreadLimit = 16;
+static HANDLE g_churnThreads[kChurnThreadLimit] = {};
+static SIZE_T g_churnThreadCount = 0;
+
+/**
+ * @brief Starts another thread after every snapshot, so the thread set never settles.
+ */
+static HANDLE startThreadPerSnapshot(DWORD, DWORD flags, DWORD processId)
+{
+    HANDLE snapshot = g_originalSnapshot(flags, processId);
+
+    if (g_churnThreadCount < kChurnThreadLimit)
+    {
+        HANDLE thread = CreateThread(NULL, 0, waitForStop, NULL, 0, NULL);
+        if (thread)
+            g_churnThreads[g_churnThreadCount++] = thread;
+    }
+
+    return snapshot;
+}
+
+/**
+ * @brief Verifies that a thread set which never settles fails as busy and releases every thread.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseThreadChurn(void)
+{
+    if (!hookSnapshots())
+        return Fail("hooking CreateToolhelp32Snapshot failed");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    const char* failure = target ? NULL : "VirtualAlloc for the thread churn target failed";
+
+    g_stopThreads = 0;
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        const BOOL hookResult = setHookObserved(startThreadPerSnapshot, &trampoline);
+        const MHOOK_STATUS status = Mhook_GetLastStatus();
+
+        if (hookResult)
+            failure = "Mhook_SetHook succeeded although threads kept starting";
+        else if (status != MHOOK_STATUS_THREAD_BUSY)
+            failure = "a thread set that never settled was not reported as busy";
+        else if (trampoline != target)
+            failure = "the failed Mhook_SetHook changed the caller slot";
+        else if (memcmp(target, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "the failed Mhook_SetHook changed the target bytes";
+        else if (!peerSuspensionsWereReleased(g_churnThreads, g_churnThreadCount))
+            failure = "a thread remained suspended after the busy failure";
+    }
+
+    InterlockedExchange(&g_stopThreads, 1);
+    for (SIZE_T index = 0; index < g_churnThreadCount; ++index)
+    {
+        WaitForSingleObject(g_churnThreads[index], INFINITE);
+        CloseHandle(g_churnThreads[index]);
+    }
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalSnapshot)) && !failure)
+        failure = "removing the CreateToolhelp32Snapshot hook failed";
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+/**
+ * @brief Lets the first snapshot through and fails the second, after peers are already suspended.
+ */
+static HANDLE failSecondSnapshot(DWORD call, DWORD flags, DWORD processId)
+{
+    if (call < 2)
+        return g_originalSnapshot(flags, processId);
+
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return INVALID_HANDLE_VALUE;
+}
+
+/**
+ * @brief Verifies that a failed snapshot is reported as such and releases the peers already suspended.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseEnumerationFailure(void)
+{
+    if (!hookSnapshots())
+        return Fail("hooking CreateToolhelp32Snapshot failed");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    const char* failure = target ? NULL : "VirtualAlloc for the enumeration failure target failed";
+
+    g_stopThreads = 0;
+    HANDLE peer = CreateThread(NULL, 0, waitForStop, NULL, 0, NULL);
+    if (!failure && !peer)
+        failure = "CreateThread for the enumeration failure peer failed";
+
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        const BOOL hookResult = setHookObserved(failSecondSnapshot, &trampoline);
+        const MHOOK_STATUS status = Mhook_GetLastStatus();
+
+        if (hookResult)
+            failure = "Mhook_SetHook succeeded although a thread snapshot failed";
+        else if (status != MHOOK_STATUS_THREAD_ENUMERATION_FAILED)
+            failure = "Mhook_SetHook did not report the failed thread snapshot";
+        else if (trampoline != target)
+            failure = "the failed Mhook_SetHook changed the caller slot";
+        else if (memcmp(target, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "the failed Mhook_SetHook changed the target bytes";
+        else if (!peerSuspensionsWereReleased(&peer, 1))
+            failure = "a peer remained suspended after the failed installation";
+    }
+
+    // Removal reports the snapshot's own error through GetLastError.
+    if (!failure && !Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        failure = "Mhook_SetHook failed without an observer";
+
+    if (!failure)
+    {
+        g_snapshotCalls = 0;
+        g_snapshotObserver = failSecondSnapshot;
+        const BOOL unhookResult = Mhook_Unhook(&trampoline);
+        const DWORD unhookError = GetLastError();
+        g_snapshotObserver = NULL;
+
+        if (unhookResult)
+            failure = "Mhook_Unhook succeeded although a thread snapshot failed";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_ENUMERATION_FAILED)
+            failure = "Mhook_Unhook did not report the failed thread snapshot";
+        else if (unhookError != ERROR_NOT_ENOUGH_MEMORY)
+            failure = "Mhook_Unhook did not report the snapshot's error";
+        else if (trampoline == target)
+            failure = "the failed Mhook_Unhook changed the caller slot";
+        else if (!peerSuspensionsWereReleased(&peer, 1))
+            failure = "a peer remained suspended after the failed removal";
+    }
+
+    InterlockedExchange(&g_stopThreads, 1);
+    if (peer)
+    {
+        WaitForSingleObject(peer, INFINITE);
+        CloseHandle(peer);
+    }
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalSnapshot)) && !failure)
+        failure = "removing the CreateToolhelp32Snapshot hook failed";
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+static HANDLE g_exitNow = NULL;
+static HANDLE g_releasedExitingThread = NULL;
+static HANDLE g_heldExitingThread = NULL;
+
+/**
+ * @brief Waits for the signal to exit, so the test controls exactly when the thread ends.
+ * @return Zero once signalled.
+ */
+static DWORD WINAPI exitWhenSignalled(LPVOID)
+{
+    WaitForSingleObject(g_exitNow, INFINITE);
+    return 0;
+}
+
+/**
+ * @brief Lets both exiting threads end after the first snapshot has listed them.
+ */
+static HANDLE endThreadsAfterFirstSnapshot(DWORD call, DWORD flags, DWORD processId)
+{
+    HANDLE snapshot = g_originalSnapshot(flags, processId);
+    if (call != 1)
+        return snapshot;
+
+    SetEvent(g_exitNow);
+    WaitForSingleObject(g_releasedExitingThread, INFINITE);
+    WaitForSingleObject(g_heldExitingThread, INFINITE);
+
+    // Closing the only handle deletes the thread object, so its ID no longer opens at all.
+    CloseHandle(g_releasedExitingThread);
+    g_releasedExitingThread = NULL;
+    return snapshot;
+}
+
+/**
+ * @brief Verifies that threads which exit after the snapshot lists them do not fail the operation.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseExitedThread(void)
+{
+    if (!hookSnapshots())
+        return Fail("hooking CreateToolhelp32Snapshot failed");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    const char* failure = target ? NULL : "VirtualAlloc for the exited thread target failed";
+
+    // One thread's object is deleted before the engine opens it; the other stays alive through
+    // this test's handle, so the engine opens it but cannot suspend it.
+    g_exitNow = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_releasedExitingThread = CreateThread(NULL, 0, exitWhenSignalled, NULL, 0, NULL);
+    g_heldExitingThread = CreateThread(NULL, 0, exitWhenSignalled, NULL, 0, NULL);
+    if (!failure && (!g_exitNow || !g_releasedExitingThread || !g_heldExitingThread))
+        failure = "creating the exiting threads failed";
+
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        if (!setHookObserved(endThreadsAfterFirstSnapshot, &trampoline))
+            failure = "Mhook_SetHook failed because listed threads exited before suspension";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+            failure = "Mhook_SetHook reported a failure for threads that had exited";
+    }
+
+    if (g_exitNow)
+        SetEvent(g_exitNow);
+    if (g_releasedExitingThread)
+    {
+        WaitForSingleObject(g_releasedExitingThread, INFINITE);
+        CloseHandle(g_releasedExitingThread);
+    }
+    if (g_heldExitingThread)
+    {
+        WaitForSingleObject(g_heldExitingThread, INFINITE);
+        CloseHandle(g_heldExitingThread);
+    }
+    if (g_exitNow)
+        CloseHandle(g_exitNow);
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalSnapshot)) && !failure)
+        failure = "removing the CreateToolhelp32Snapshot hook failed";
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+/**
+ * @brief Verifies that a peer parked inside the patch range fails the operation as busy.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseThreadBusy(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the busy thread target failed");
+
+    // A thread that never ran can be moved anywhere; this test's own suspension keeps it there.
+    g_stopThreads = 0;
+    HANDLE parked = CreateThread(NULL, 0, waitForStop, NULL, CREATE_SUSPENDED, NULL);
+    const char* failure = parked ? NULL : "CreateThread for the parked thread failed";
+
+    CONTEXT original = {};
+    original.ContextFlags = CONTEXT_CONTROL;
+    if (!failure && !GetThreadContext(parked, &original))
+        failure = "reading the parked thread's context failed";
+
+    if (!failure)
+    {
+        CONTEXT insideTarget = original;
+#ifdef _M_X64
+        insideTarget.Rip = reinterpret_cast<DWORD64>(target + 1);
+#else
+        insideTarget.Eip = reinterpret_cast<DWORD>(target + 1);
+#endif
+        if (!SetThreadContext(parked, &insideTarget))
+            failure = "moving the parked thread into the target failed";
+    }
+
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        const BOOL hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+
+        if (hookResult)
+            failure = "Mhook_SetHook succeeded with a thread stopped inside the target";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
+            failure = "a thread stopped inside the target was not reported as busy";
+        else if (trampoline != target)
+            failure = "the failed Mhook_SetHook changed the caller slot";
+        else if (memcmp(target, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "the failed Mhook_SetHook changed the target bytes";
+    }
+
+    // The engine must leave exactly this test's own suspension behind.
+    if (!failure)
+    {
+        const DWORD previousSuspendCount = SuspendThread(parked);
+        if (previousSuspendCount != 1)
+            failure = "the engine did not release its suspension of the parked thread";
+        if (previousSuspendCount != (DWORD)-1)
+            ResumeThread(parked);
+    }
+
+    if (parked)
+    {
+        InterlockedExchange(&g_stopThreads, 1);
+        if (!SetThreadContext(parked, &original) && !failure)
+            failure = "restoring the parked thread's context failed";
+        ResumeThread(parked);
+        WaitForSingleObject(parked, INFINITE);
+        CloseHandle(parked);
+    }
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+typedef DWORD(WINAPI* ResumeFunction)(HANDLE thread);
+
+static ResumeFunction g_originalResume = NULL;
+static volatile LONG g_reportResumeFailure = 0;
+
+/**
+ * @brief Resumes the thread, then reports failure while the test asks it to.
+ * @param[in] thread Thread to resume.
+ * @return The previous suspend count, or (DWORD)-1 while failures are being reported.
+ */
+static DWORD WINAPI resumeReportingFailure(HANDLE thread)
+{
+    const DWORD previousSuspendCount = g_originalResume(thread);
+    if (!g_reportResumeFailure)
+        return previousSuspendCount;
+
+    SetLastError(ERROR_INVALID_HANDLE);
+    return (DWORD)-1;
+}
+
+/**
+ * @brief Verifies that a failed resume is reported without undoing a completed operation.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseResumeFailure(void)
+{
+    g_originalResume = reinterpret_cast<ResumeFunction>(
+        reinterpret_cast<void (*)(void)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ResumeThread"))
+    );
+    if (!g_originalResume ||
+        !Mhook_SetHook(reinterpret_cast<PVOID*>(&g_originalResume), reinterpret_cast<PVOID>(&resumeReportingFailure)))
+        return Fail("hooking ResumeThread failed");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    const char* failure = target ? NULL : "VirtualAlloc for the resume failure target failed";
+
+    g_stopThreads = 0;
+    HANDLE peer = CreateThread(NULL, 0, waitForStop, NULL, 0, NULL);
+    if (!failure && !peer)
+        failure = "CreateThread for the resume failure peer failed";
+
+    PVOID trampoline = target;
+    if (!failure)
+    {
+        InterlockedExchange(&g_reportResumeFailure, 1);
+        const BOOL hookResult = Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting));
+        InterlockedExchange(&g_reportResumeFailure, 0);
+
+        if (!hookResult)
+            failure = "Mhook_SetHook failed although only resuming a peer failed";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_RESUME_FAILED)
+            failure = "Mhook_SetHook did not report the failed resume";
+        else if (trampoline == target)
+            failure = "the completed Mhook_SetHook did not publish its trampoline";
+        else if (reinterpret_cast<int (*)(void)>(target)() != HOOK_RESULT)
+            failure = "the completed Mhook_SetHook did not redirect the target";
+        else if (!peerSuspensionsWereReleased(&peer, 1))
+            failure = "the peer was left suspended";
+    }
+
+    if (!failure)
+    {
+        InterlockedExchange(&g_reportResumeFailure, 1);
+        const BOOL unhookResult = Mhook_Unhook(&trampoline);
+        InterlockedExchange(&g_reportResumeFailure, 0);
+
+        if (!unhookResult)
+            failure = "Mhook_Unhook failed although only resuming a peer failed";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_RESUME_FAILED)
+            failure = "Mhook_Unhook did not report the failed resume";
+        else if (trampoline != target)
+            failure = "the completed Mhook_Unhook did not restore the caller slot";
+        else if (memcmp(target, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "the completed Mhook_Unhook did not restore the target";
+    }
+
+    InterlockedExchange(&g_stopThreads, 1);
+    if (peer)
+    {
+        WaitForSingleObject(peer, INFINITE);
+        CloseHandle(peer);
+    }
+
+    if (trampoline != target && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the target hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalResume)) && !failure)
+        failure = "removing the ResumeThread hook failed";
     if (target)
         VirtualFree(target, 0, MEM_RELEASE);
 
@@ -1838,6 +2288,11 @@ static const TestCase kCases[] = {
     {"suspend_failure", caseSuspensionFailure},
     {"first_use_race", caseFirstUseRace},
     {"late_thread", caseLateThread},
+    {"thread_churn", caseThreadChurn},
+    {"enumeration_failure", caseEnumerationFailure},
+    {"exited_thread", caseExitedThread},
+    {"thread_busy", caseThreadBusy},
+    {"resume_failure", caseResumeFailure},
     {"reuse", CaseReuse},
 #ifdef _M_X64
     {"pool", caseTrampolinePoolBookkeeping},

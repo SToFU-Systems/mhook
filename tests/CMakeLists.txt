@@ -130,6 +130,11 @@ set(hookCases
     suspend_failure
     first_use_race
     late_thread
+    thread_churn
+    enumeration_failure
+    exited_thread
+    thread_busy
+    resume_failure
     reuse
     sweep
 )
