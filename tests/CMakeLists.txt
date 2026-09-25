@@ -171,6 +171,15 @@ set(hookCases
     thread_busy
     resume_failure
     reuse
+    pool_statistics
+    stranded_rollback
+    trampoline_protection
+    protection_failure
+    reclaim_keeps_active
+    reclaim_busy
+    reclaim_churn
+    reclaim_empty_block
+    low_target
     sweep
 )
 foreach(case IN LISTS hookCases)
@@ -181,14 +190,16 @@ endforeach()
 if(MHOOK_ARCHITECTURE STREQUAL "x64")
     add_test(NAME mhook.hook.pool COMMAND mhook-hook-test pool)
     set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
+    add_test(NAME mhook.hook.block_protection_refused COMMAND mhook-hook-test block_protection_refused)
+    set_tests_properties(mhook.hook.block_protection_refused PROPERTIES TIMEOUT 15)
 endif()
 
 # Every hook and unhook pair costs at least two system wide thread snapshots in the
 # library, and that rate, not the hook engine, sets the runtime of the bulk
 # cases. They therefore sample by default, which is what these timeouts are
 # sized for. Setting MHOOK_TEST_EXHAUSTIVE in the environment runs them in full
-# instead, which takes roughly twenty minutes per configuration, so keep that
-# for a nightly job rather than a pull request.
+# instead, which takes about half an hour per configuration, so keep that for a
+# nightly job rather than a pull request.
 # mhook.hook.threads is the exception among these. Its cost is not the work it
 # performs but how often a spinning worker happens to be inside the patch range
 # when the engine suspends it, because each collision costs another snapshot
@@ -198,4 +209,5 @@ endif()
 # to catch a hang rather than to hold a performance budget.
 set_tests_properties(mhook.hook.threads PROPERTIES TIMEOUT 600)
 set_tests_properties(mhook.hook.reuse PROPERTIES TIMEOUT 180)
+set_tests_properties(mhook.hook.reclaim_churn PROPERTIES TIMEOUT 180)
 set_tests_properties(mhook.hook.sweep PROPERTIES TIMEOUT 300)

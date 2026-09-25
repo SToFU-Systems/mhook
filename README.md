@@ -50,12 +50,12 @@ Successful hook operations preserve the caller's `GetLastError` value. `Mhook_Se
 | `MHOOK_STATUS_ALREADY_HOOKED` | Either the requested target or replacement resolution chain reached a target with an active hook. | Reuse or remove the existing hook before retrying. |
 | `MHOOK_STATUS_THREAD_ENUMERATION_FAILED` | The process's threads could not be listed. | Stop changing hooks and retry only if process conditions may have changed. |
 | `MHOOK_STATUS_THREAD_ACCESS_DENIED` | A peer thread refused the suspend, resume and get-context rights Mhook needs. | Do not retry; the process's thread security does not permit hooking. |
-| `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
+| `MHOOK_STATUS_THREAD_BUSY` | A peer kept executing the code being patched or freed, was still exiting, or new threads kept starting. Nothing was changed. | Retry the operation. |
 | `MHOOK_STATUS_THREAD_RESUME_FAILED` | A suspended peer could not be resumed and may stay suspended. Reported over any other status, even when the operation returned `TRUE` and its hooks are in place. | Treat the process as possibly deadlocked and stop further hook changes. |
 
 ### Batch example
 
-`Mhook_SetHookBatch` installs several hooks at once, all or nothing, and `Mhook_UnhookBatch` removes them the same way. Each `MHOOK_HOOK_INFO` names a slot that holds the function to hook: a successful install replaces it with a trampoline, which a hook calls to reach the original, and a successful removal puts the original back, so one descriptor array serves both calls. The library needs no initialization or shutdown call.
+`Mhook_SetHookBatch` installs several hooks at once, all or nothing, and `Mhook_UnhookBatch` removes them the same way. Each `MHOOK_HOOK_INFO` names a slot that holds the function to hook: a successful install replaces it with a trampoline, which a hook calls to reach the original, and a successful removal puts the original back, so one descriptor array serves both calls. The library needs no initialization call; see [Trampoline memory](#trampoline-memory) for releasing trampolines of removed hooks.
 
 <!-- readme-batch-example:begin -->
 ```cpp
@@ -118,6 +118,13 @@ int main(void)
 
     // Not hooked any more, so this prints nothing.
     GetFileAttributesW(directory);
+
+    // The removed trampolines are only retired. No code here can call them any more, so free them.
+    if (!Mhook_ReclaimRetired())
+    {
+        printf("Mhook_ReclaimRetired failed with status %d\n", (int)Mhook_GetLastStatus());
+        return 1;
+    }
     return 0;
 }
 ```
@@ -130,7 +137,7 @@ hooked GetCurrentDirectoryW
 hooked GetFileAttributesW
 ```
 
-After a successful removal nothing needs cleaning up. The trampolines stay allocated, because a thread may still be returning through one, but they must not be called again. Link against `mhook::mhook`, as shown under [Install](#install) and [Use as a subproject](#use-as-a-subproject).
+After a successful removal the trampolines are retired, not freed, because a thread may still be about to call one; they keep reaching the original function. `Mhook_ReclaimRetired` frees them once no code can call them any more, which the example does at the end. Link against `mhook::mhook`, as shown under [Install](#install) and [Use as a subproject](#use-as-a-subproject).
 
 The build compiles and runs this exact block as the `mhook.readme.batch_example` test, so it cannot fall out of step with `mhook.h`. The `batch` case in [tests/hook-test.cpp](tests/hook-test.cpp) covers the same calls in more detail, including per-descriptor statuses and preservation of `GetLastError`.
 
@@ -151,6 +158,16 @@ No privilege is required. Each right is checked against the thread's security de
 A thread whose DACL withholds one of these rights, as some sandboxes and anti-tamper components arrange, fails the operation with `MHOOK_STATUS_THREAD_ACCESS_DENIED` and changes nothing, because patching while that thread keeps running would be unsafe. An enabled `SeDebugPrivilege` bypasses thread DACLs.
 
 One race remains. A thread started from outside the process, by `CreateRemoteThread` from another process or by the kernel, can appear after the last snapshot and run while the code is patched. Mhook cannot stop a thread it has not seen.
+
+### Trampoline memory
+
+Each hook's generated code lives in a 64-byte slot of a pool block that Mhook allocates within jump range of the target. Everything else Mhook keeps about a hook lives on the heap, so the pool pages hold nothing but code. The search for a block tries the nearest free address below and above the target alternately, and keeps going on one side after the other runs out of range.
+
+Pool pages are `PAGE_EXECUTE_READ`. A new block is filled while it is only writable and switched to execute-read before any slot is used. A slot is written while every other thread is suspended: its page becomes `PAGE_EXECUTE_READWRITE`, the code is copied in, and the page returns to `PAGE_EXECUTE_READ`, which is checked before the hook is activated. The page stays executable during the write because a hook on a function Mhook itself calls there, such as `VirtualProtect` or `NtProtectVirtualMemory`, may have its trampoline on that page, and the calling thread is never suspended. If a protection change fails, the hook is not installed and the operation reports `MHOOK_STATUS_MEMORY_PROTECTION_FAILED`; a page that could not return to execute-read is left `PAGE_EXECUTE_READWRITE` until the next successful write to it.
+
+A slot is free, active while its hook is installed, retired after the hook is removed, or stranded when a failed installation could not restore its target. Retired slots keep working and are never handed out again until `Mhook_ReclaimRetired` frees them. That call suspends the other threads, fails with `MHOOK_STATUS_THREAD_BUSY` if one is executing a retired slot, and otherwise frees every retired slot and releases every block left empty. It cannot see a hook function that has loaded a trampoline pointer and not yet called it, so call it only once none can still do so, for example after the hooks' callers have finished or at shutdown. A reclaimed trampoline address may be handed out again to a later hook, so a stale copy must not be passed to any Mhook call. Stranded slots are never freed. `Mhook_GetPoolStatistics` reports the counts of each kind, the number of blocks and the address space they hold.
+
+Processes that forbid dynamic code, through Arbitrary Code Guard, cannot make pool pages executable, so hooks cannot be installed there.
 
 ## Documentation
 

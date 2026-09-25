@@ -41,6 +41,8 @@ static BOOL (*volatile removeHookBatch)(MHOOK_HOOK_INFO*, SIZE_T) = &Mhook_Unhoo
 static PVOID (*volatile getTarget)(PVOID) = &Mhook_GetTarget;
 static MHOOK_STATUS (*volatile getLastStatus)(void) = &Mhook_GetLastStatus;
 static const char* (*volatile getVersion)(void) = &Mhook_GetVersion;
+static BOOL (*volatile getPoolStatistics)(MHOOK_POOL_STATISTICS*) = &Mhook_GetPoolStatistics;
+static BOOL (*volatile reclaimRetired)(void) = &Mhook_ReclaimRetired;
 
 /**
  * @brief Reports a consumer integration test failure.
@@ -65,7 +67,8 @@ static int mhookConsumerCheck(void)
     BOOL result = FALSE;
 
     // Every public symbol must be reachable from this language.
-    if (!setHook || !setHookBatch || !removeHook || !removeHookBatch || !getTarget || !getLastStatus || !getVersion)
+    if (!setHook || !setHookBatch || !removeHook || !removeHookBatch || !getTarget || !getLastStatus || !getVersion ||
+        !getPoolStatistics || !reclaimRetired)
         return mhookConsumerFail("one or more public Mhook symbols are unavailable");
 
     // The linked library must report the version its headers declare. They can
