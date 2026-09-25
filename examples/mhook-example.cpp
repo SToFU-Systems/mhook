@@ -195,6 +195,32 @@ static void UnhookAndReport(PVOID* ppHookedFunction, const char* pszName)
 }
 
 //=========================================================================
+// Prints the trampoline pool counts.
+//
+// A removed hook's trampoline is retired rather than freed, because code that
+// loaded it earlier may still call it. The pool statistics show the retired
+// trampolines piling up until Mhook_ReclaimRetired frees them.
+//
+static void PrintPool(const char* pszWhen)
+{
+    MHOOK_POOL_STATISTICS stats = {};
+    if (!Mhook_GetPoolStatistics(&stats))
+    {
+        printf("Could not read the trampoline pool: error %lu\n", GetLastError());
+        return;
+    }
+    printf(
+        "Trampoline pool %s: %zu active, %zu retired, %zu free in %zu block(s) of %zu bytes total\n",
+        pszWhen,
+        (size_t)stats.activeTrampolines,
+        (size_t)stats.retiredTrampolines,
+        (size_t)stats.freeTrampolines,
+        (size_t)stats.blockCount,
+        (size_t)stats.reservedBytes
+    );
+}
+
+//=========================================================================
 // This is where the work gets done.
 //
 int wmain(int, WCHAR*[])
@@ -302,6 +328,17 @@ int wmain(int, WCHAR*[])
         // Remove the hook
         UnhookAndReport((PVOID*)&TrueNtClose, "NtClose");
     }
+
+    // Every hook is removed, but its trampoline is only retired. Freeing them is
+    // up to the caller, and safe only once no thread can still call one: a thread
+    // that loaded a trampoline pointer before the removal may be about to use it.
+    // A real program does this after its threads stop using the hooks, for
+    // example at shutdown. Mhook refuses with MHOOK_STATUS_THREAD_BUSY while any
+    // thread is executing inside a retired trampoline.
+    PrintPool("before reclaim");
+    if (!Mhook_ReclaimRetired())
+        printf("Could not reclaim retired trampolines: status %d\n", (int)Mhook_GetLastStatus());
+    PrintPool("after reclaim");
 
     return 0;
 }

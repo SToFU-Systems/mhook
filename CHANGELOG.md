@@ -54,6 +54,12 @@ documentation.
 - **Project conventions.** `.clang-format`, `.editorconfig`, `.gitattributes`,
   VS Code tasks and launch configurations, and Git hooks that reject
   unformatted sources and malformed commit messages.
+- **Trampoline reclaim.** `Mhook_ReclaimRetired()` frees the trampolines of
+  removed hooks and releases pool blocks that no installed hook uses, so hook
+  churn in long-running processes no longer grows memory without bound.
+- **Pool statistics.** `Mhook_GetPoolStatistics()` reports active, retired,
+  stranded and free trampolines, the number of pool blocks and the address
+  space they hold.
 
 ### Changed
 
@@ -74,6 +80,10 @@ documentation.
   `BUILD_TESTING`. A parent project enabling CTest used to drag mhook's tests
   into its own build.
 - Version numbering restarts at 3.0.0; upstream's last release was 2.4.
+- **Trampoline pages are execute-read.** Pool pages were writable and
+  executable for the life of the process. They are now `PAGE_EXECUTE_READ`,
+  and writable only while a hook is being installed with every other thread
+  suspended. Hook metadata moved off the executable pages onto the heap.
 
 ### Fixed
 
@@ -118,6 +128,10 @@ documentation.
   write position when it filled its buffer; it is now truncated cleanly.
 - Two decoder diagnostics passed an integer where the message printed a
   string.
+- On x86, a target loaded a few megabytes above address zero could fail to
+  hook with `MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED`: the search for
+  trampoline memory gave up as soon as it reached the bottom of the address
+  space, without trying the free memory above the target.
 
 ### Removed
 

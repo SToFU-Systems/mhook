@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 #include "mhook-lib/mhook.h"
 
 typedef int (*TargetFn)(void);
@@ -2262,6 +2263,745 @@ static int CaseSweep(void)
     return 0;
 }
 
+/**
+ * @brief Reads the pool statistics, treating failure as an empty read the caller reports.
+ * @param[out] statistics Receives the counts.
+ * @return TRUE when the statistics were read.
+ */
+static BOOL readPool(MHOOK_POOL_STATISTICS* statistics)
+{
+    *statistics = MHOOK_POOL_STATISTICS{};
+    return Mhook_GetPoolStatistics(statistics);
+}
+
+/**
+ * @brief Verifies that pool statistics follow installation and removal, and that removal keeps the slot.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int casePoolStatistics(void)
+{
+    SetLastError(ERROR_SUCCESS);
+    if (Mhook_GetPoolStatistics(NULL) || GetLastError() != ERROR_INVALID_PARAMETER)
+        return Fail("Mhook_GetPoolStatistics accepted a NULL argument");
+
+    MHOOK_POOL_STATISTICS initial = {};
+    if (!readPool(&initial))
+        return Fail("reading the initial pool statistics failed");
+    if (initial.activeTrampolines || initial.retiredTrampolines || initial.strandedTrampolines ||
+        initial.freeTrampolines || initial.blockCount || initial.reservedBytes)
+        return Fail("a fresh process reported a non-empty trampoline pool");
+
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed");
+
+    MHOOK_POOL_STATISTICS installed = {};
+    if (!readPool(&installed))
+        return Fail("reading the pool statistics after installation failed");
+    if (installed.activeTrampolines != 1 || installed.retiredTrampolines != 0)
+        return Fail("an installed hook was not counted as active");
+    if (installed.blockCount != 1 || installed.reservedBytes == 0 || installed.freeTrampolines == 0)
+        return Fail("the first hook did not allocate exactly one pool block");
+
+    const PVOID retiredTrampoline = trampoline;
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed");
+
+    MHOOK_POOL_STATISTICS removed = {};
+    if (!readPool(&removed))
+        return Fail("reading the pool statistics after removal failed");
+    if (removed.activeTrampolines != 0 || removed.retiredTrampolines != 1)
+        return Fail("a removed hook was not counted as retired");
+    if (removed.freeTrampolines != installed.freeTrampolines)
+        return Fail("removal returned the retired slot to the free slots");
+    if (removed.blockCount != installed.blockCount || removed.reservedBytes != installed.reservedBytes)
+        return Fail("removal released pool memory");
+
+    // A new hook on the same target must not reuse the retired slot.
+    PVOID reinstalled = target;
+    if (!Mhook_SetHook(&reinstalled, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("reinstalling the hook failed");
+    if (reinstalled == retiredTrampoline)
+        return Fail("a retired trampoline was handed out again");
+    if (!Mhook_Unhook(&reinstalled))
+        return Fail("removing the reinstalled hook failed");
+
+    SetLastError(ERROR_BAD_COMMAND);
+    if (!Mhook_ReclaimRetired() || Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_ReclaimRetired failed with no thread inside a retired trampoline");
+    if (GetLastError() != ERROR_BAD_COMMAND)
+        return Fail("a successful reclaim changed the caller's last error");
+
+    MHOOK_POOL_STATISTICS reclaimed = {};
+    if (!readPool(&reclaimed))
+        return Fail("reading the pool statistics after reclaim failed");
+    if (reclaimed.activeTrampolines || reclaimed.retiredTrampolines || reclaimed.freeTrampolines ||
+        reclaimed.blockCount || reclaimed.reservedBytes)
+        return Fail("reclaim with no installed hooks did not release the whole pool");
+
+    SetLastError(ERROR_BAD_COMMAND);
+    if (!Mhook_ReclaimRetired() || Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_ReclaimRetired failed on an empty pool");
+    if (GetLastError() != ERROR_BAD_COMMAND)
+        return Fail("a successful reclaim of an empty pool changed the caller's last error");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+typedef BOOL(WINAPI* ProtectFunction)(LPVOID address, SIZE_T size, DWORD newProtection, PDWORD oldProtection);
+typedef bool (*ProtectRefusal)(PBYTE address, DWORD newProtection);
+
+static ProtectFunction g_originalProtect = NULL;
+static ProtectRefusal g_protectRefusal = NULL;
+static volatile LONG g_refusedProtects = 0;
+
+/**
+ * @brief Refuses the protection changes the active refusal names and forwards every other call.
+ * @param[in] address Start of the range.
+ * @param[in] size Size of the range.
+ * @param[in] newProtection Requested protection.
+ * @param[out] oldProtection Receives the previous protection.
+ * @return The original function's result, or FALSE with ERROR_ACCESS_DENIED when refused.
+ */
+static BOOL WINAPI protectRefusing(LPVOID address, SIZE_T size, DWORD newProtection, PDWORD oldProtection)
+{
+    const ProtectRefusal refusal = g_protectRefusal;
+    if (refusal && refusal(static_cast<PBYTE>(address), newProtection))
+    {
+        InterlockedIncrement(&g_refusedProtects);
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+
+    // Installing this very hook calls VirtualProtect on the patched target before the trampoline
+    // is published, and the unpublished slot would lead straight back here.
+    const ProtectFunction original = g_originalProtect;
+    if (!original)
+        return VirtualProtectEx(GetCurrentProcess(), address, size, newProtection, oldProtection);
+
+    return original(address, size, newProtection, oldProtection);
+}
+
+/**
+ * @brief Routes every VirtualProtect call in the process through protectRefusing.
+ * @return TRUE when the hook is installed.
+ */
+static BOOL hookProtect(void)
+{
+    PVOID original = reinterpret_cast<PVOID>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "VirtualProtect"));
+
+    // g_originalProtect stays NULL until the trampoline exists; see protectRefusing.
+    g_originalProtect = NULL;
+    if (!original || !Mhook_SetHook(&original, reinterpret_cast<PVOID>(&protectRefusing)))
+        return FALSE;
+
+    g_originalProtect = reinterpret_cast<ProtectFunction>(original);
+    return TRUE;
+}
+
+/**
+ * @brief Reports whether two addresses share a page.
+ * @param[in] first First address.
+ * @param[in] second Second address.
+ * @return true when both lie in the same page.
+ */
+static bool samePage(const void* first, const void* second)
+{
+    SYSTEM_INFO info = {};
+    GetSystemInfo(&info);
+    const uintptr_t mask = ~static_cast<uintptr_t>(info.dwPageSize - 1);
+    return (reinterpret_cast<uintptr_t>(first) & mask) == (reinterpret_cast<uintptr_t>(second) & mask);
+}
+
+static PBYTE g_strandedTarget = NULL;
+static LONG g_strandedTargetWrites = 0;
+
+/**
+ * @brief Lets installation make the stranded target writable, then refuses the rollback's attempt.
+ * @param[in] address Start of the range.
+ * @param[in] newProtection Requested protection.
+ * @return true for the second request to make the stranded target's page writable.
+ */
+static bool refuseStrandedRollback(PBYTE address, DWORD newProtection)
+{
+    if (newProtection != PAGE_EXECUTE_READWRITE || !samePage(address, g_strandedTarget))
+        return false;
+
+    return ++g_strandedTargetWrites > 1;
+}
+
+/**
+ * @brief Verifies that an entry whose target a failed rollback could not restore is kept as stranded.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseStrandedRollback(void)
+{
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    HANDLE mapping = NULL;
+    PBYTE secondTarget = allocateReadOnlyCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), &mapping);
+    if (!firstTarget || !secondTarget)
+        return Fail("allocating the stranded rollback targets failed");
+
+    // Execute-read, so installation restores a protection the refusal does not match.
+    DWORD ignoredProtection = 0;
+    if (!VirtualProtect(firstTarget, TARGET_BUFFER_SIZE, PAGE_EXECUTE_READ, &ignoredProtection))
+        return Fail("making the first target execute-read failed");
+
+    if (!hookProtect())
+        return Fail("hooking VirtualProtect failed");
+
+    MHOOK_POOL_STATISTICS before = {};
+    if (!readPool(&before))
+        return Fail("reading the pool statistics before the batch failed");
+
+    PVOID firstSlot = firstTarget;
+    PVOID secondSlot = secondTarget;
+    MHOOK_HOOK_INFO hooks[] = {
+        {&firstSlot, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_SUCCESS},
+        {&secondSlot, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_SUCCESS}
+    };
+
+    g_strandedTarget = firstTarget;
+    g_strandedTargetWrites = 0;
+    g_protectRefusal = refuseStrandedRollback;
+    const BOOL result = Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks));
+    g_protectRefusal = NULL;
+
+    MHOOK_POOL_STATISTICS after = {};
+    const char* failure = NULL;
+    if (!readPool(&after))
+        failure = "reading the pool statistics after the batch failed";
+    else if (result)
+        failure = "a batch with a read-only target succeeded";
+    else if (hooks[0].status != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+        failure = "the failed rollback was not reported on its descriptor";
+    else if (after.strandedTrampolines != before.strandedTrampolines + 1)
+        failure = "the entry the rollback could not restore was not counted as stranded";
+    else if (after.activeTrampolines != before.activeTrampolines)
+        failure = "the failed batch changed the number of active hooks";
+    else if (firstSlot != firstTarget || secondSlot != secondTarget)
+        failure = "the failed batch changed a caller slot";
+
+    // The first target stays patched: it belongs to the stranded entry and is never freed or called.
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalProtect)) && !failure)
+        failure = "removing the VirtualProtect hook failed";
+    UnmapViewOfFile(secondTarget);
+    CloseHandle(mapping);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+/**
+ * @brief Reports whether the page holding an address has exactly one protection.
+ * @param[in] address Address to query.
+ * @param[in] protection Expected protection.
+ * @return true when VirtualQuery reports exactly that protection.
+ */
+static bool hasProtection(const void* address, DWORD protection)
+{
+    MEMORY_BASIC_INFORMATION info = {};
+    return VirtualQuery(address, &info, sizeof(info)) == sizeof(info) && info.Protect == protection;
+}
+
+/**
+ * @brief Places a second copy of kMovEaxRet in the upper half of a target buffer.
+ * @param[in,out] buffer Buffer from AllocCodeBuffer.
+ * @return The second target, which shares the first target's page and trampoline range.
+ */
+static PBYTE addSecondTarget(PBYTE buffer)
+{
+    PBYTE second = buffer + TARGET_BUFFER_SIZE / 2;
+    memcpy(second, kMovEaxRet, sizeof(kMovEaxRet));
+    FlushInstructionCache(GetCurrentProcess(), second, sizeof(kMovEaxRet));
+    return second;
+}
+
+/**
+ * @brief Verifies that installed and retired trampolines live on execute-read pages and keep working.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseTrampolineProtection(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed");
+    if (!hasProtection(trampoline, PAGE_EXECUTE_READ))
+        return Fail("an installed trampoline page is not PAGE_EXECUTE_READ");
+    if (reinterpret_cast<TargetFn>(target)() != HOOK_RESULT)
+        return Fail("calling the target did not reach the hook");
+    if (reinterpret_cast<TargetFn>(trampoline)() != TARGET_RESULT)
+        return Fail("calling the trampoline did not reach the original");
+
+    const PVOID retired = trampoline;
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed");
+    if (!hasProtection(retired, PAGE_EXECUTE_READ))
+        return Fail("a retired trampoline page is not PAGE_EXECUTE_READ");
+    if (reinterpret_cast<TargetFn>(retired)() != TARGET_RESULT)
+        return Fail("a retired trampoline no longer reaches the original");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+static PBYTE g_refusalTarget = NULL;
+static DWORD g_refusedProtection = 0;
+
+/**
+ * @brief Refuses one protection value everywhere except the test targets' page, so only pool pages are affected.
+ * @param[in] address Start of the range.
+ * @param[in] newProtection Requested protection.
+ * @return true when the request must be refused.
+ */
+static bool refusePoolProtection(PBYTE address, DWORD newProtection)
+{
+    return newProtection == g_refusedProtection && !samePage(address, g_refusalTarget);
+}
+
+/**
+ * @brief Installs a hook while one pool protection change is refused.
+ * @param[in] protection Protection value to refuse.
+ * @param[in,out] slot Hook slot passed to Mhook_SetHook.
+ * @param[out] status Status reported for the installation.
+ * @return The Mhook_SetHook result.
+ */
+static BOOL setHookRefusing(DWORD protection, PVOID* slot, MHOOK_STATUS* status)
+{
+    g_refusedProtection = protection;
+    g_refusedProtects = 0;
+    g_protectRefusal = refusePoolProtection;
+    const BOOL result = Mhook_SetHook(slot, reinterpret_cast<PVOID>(&HookCounting));
+    *status = Mhook_GetLastStatus();
+    g_protectRefusal = NULL;
+    return result;
+}
+
+/**
+ * @brief Verifies that a failed pool protection change prevents activation and leaves neighbours running.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseProtectionFailure(void)
+{
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!firstTarget)
+        return Fail("VirtualAlloc for the target buffer failed");
+    PBYTE secondTarget = addSecondTarget(firstTarget);
+    g_refusalTarget = firstTarget;
+
+    if (!hookProtect())
+        return Fail("hooking VirtualProtect failed");
+
+    // The first hook's slot and the second's end up in the same block and page.
+    PVOID firstTrampoline = firstTarget;
+    if (!Mhook_SetHook(&firstTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("installing the first hook failed");
+
+    MHOOK_POOL_STATISTICS before = {};
+    if (!readPool(&before))
+        return Fail("reading the pool statistics failed");
+
+    const char* failure = NULL;
+    const DWORD refusals[] = {PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ};
+    for (size_t index = 0; index < ARRAYSIZE(refusals) && !failure; ++index)
+    {
+        PVOID secondTrampoline = secondTarget;
+        MHOOK_STATUS status = MHOOK_STATUS_SUCCESS;
+        const BOOL result = setHookRefusing(refusals[index], &secondTrampoline, &status);
+
+        MHOOK_POOL_STATISTICS after = {};
+        if (!readPool(&after))
+            failure = "reading the pool statistics failed";
+        else if (!g_refusedProtects)
+            failure = "the installation never changed a pool page's protection";
+        else if (result)
+            failure = "an installation succeeded although its slot protection could not be set";
+        else if (status != MHOOK_STATUS_MEMORY_PROTECTION_FAILED)
+            failure = "a refused slot protection was not reported as MEMORY_PROTECTION_FAILED";
+        else if (secondTrampoline != secondTarget)
+            failure = "the failed installation changed the caller slot";
+        else if (memcmp(secondTarget, kMovEaxRet, sizeof(kMovEaxRet)) != 0)
+            failure = "the failed installation changed the target";
+        else if (after.activeTrampolines != before.activeTrampolines ||
+                 after.freeTrampolines != before.freeTrampolines || after.blockCount != before.blockCount)
+            failure = "the failed installation changed the pool";
+        else if (reinterpret_cast<TargetFn>(firstTrampoline)() != TARGET_RESULT)
+            failure = "an active neighbour trampoline stopped working";
+        else if (refusals[index] == PAGE_EXECUTE_READ && !hasProtection(firstTrampoline, PAGE_EXECUTE_READWRITE))
+            failure = "a page that could not return to execute-read was not left PAGE_EXECUTE_READWRITE";
+    }
+
+    // A later successful write makes the pool pages execute-read again.
+    PVOID secondTrampoline = secondTarget;
+    if (!failure && !Mhook_SetHook(&secondTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        failure = "installing the second hook without refusals failed";
+    else if (!failure && !samePage(firstTrampoline, secondTrampoline))
+        failure = "the test's two trampolines do not share a page, so it proves nothing about neighbours";
+    else if (!failure && (!hasProtection(secondTrampoline, PAGE_EXECUTE_READ) ||
+                          !hasProtection(firstTrampoline, PAGE_EXECUTE_READ)))
+        failure = "a successful installation left a pool page writable";
+
+    if (secondTrampoline != secondTarget && !Mhook_Unhook(&secondTrampoline) && !failure)
+        failure = "removing the second hook failed";
+    if (!Mhook_Unhook(&firstTrampoline) && !failure)
+        failure = "removing the first hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalProtect)) && !failure)
+        failure = "removing the VirtualProtect hook failed";
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+#ifdef _M_X64
+/**
+ * @brief Verifies that the block search stops at the first new block that cannot be made execute-read.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseBlockProtectionRefused(void)
+{
+    // Far from every module, so no existing block is in range and the search must allocate one.
+    static const uintptr_t kTargetAddresses[] =
+        {UINT64_C(0x0000000200000000), UINT64_C(0x0000000A00000000), UINT64_C(0x0000001200000000)};
+
+    PBYTE target = NULL;
+    for (size_t index = 0; index < ARRAYSIZE(kTargetAddresses) && !target; ++index)
+        target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(kTargetAddresses[index]));
+    if (!target)
+        return Fail("VirtualAlloc could not reserve a distant target");
+    g_refusalTarget = target;
+
+    if (!hookProtect())
+        return Fail("hooking VirtualProtect failed");
+
+    MHOOK_POOL_STATISTICS before = {};
+    if (!readPool(&before))
+        return Fail("reading the pool statistics failed");
+
+    PVOID trampoline = target;
+    MHOOK_STATUS status = MHOOK_STATUS_SUCCESS;
+    const BOOL result = setHookRefusing(PAGE_EXECUTE_READ, &trampoline, &status);
+    const LONG refusedProtects = g_refusedProtects;
+
+    MHOOK_POOL_STATISTICS after = {};
+    const char* failure = NULL;
+    if (!readPool(&after))
+        failure = "reading the pool statistics failed";
+    else if (result)
+        failure = "an installation succeeded although no new block could be made execute-read";
+    else if (status != MHOOK_STATUS_TRAMPOLINE_ALLOCATION_FAILED)
+        failure = "a refused block protection was not reported as TRAMPOLINE_ALLOCATION_FAILED";
+    else if (refusedProtects != 1)
+        failure = "the block search went on after the process refused executable memory";
+    else if (after.blockCount != before.blockCount)
+        failure = "the failed installation changed the number of blocks";
+    else if (trampoline != target)
+        failure = "the failed installation changed the caller slot";
+
+    if (result && !Mhook_Unhook(&trampoline) && !failure)
+        failure = "removing the unexpected hook failed";
+    if (!Mhook_Unhook(reinterpret_cast<PVOID*>(&g_originalProtect)) && !failure)
+        failure = "removing the VirtualProtect hook failed";
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+    {
+        fprintf(stderr, "refused protection changes: %ld\n", refusedProtects);
+        return Fail(failure);
+    }
+    return 0;
+}
+#endif // _M_X64
+
+/**
+ * @brief Verifies that reclaim frees a retired neighbour but keeps an active trampoline and its block.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseReclaimKeepsActive(void)
+{
+    PBYTE firstTarget = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!firstTarget)
+        return Fail("VirtualAlloc for the target buffer failed");
+    PBYTE secondTarget = addSecondTarget(firstTarget);
+
+    PVOID firstTrampoline = firstTarget;
+    PVOID secondTrampoline = secondTarget;
+    if (!Mhook_SetHook(&firstTrampoline, reinterpret_cast<PVOID>(&HookCounting)) ||
+        !Mhook_SetHook(&secondTrampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("installing the two hooks failed");
+    if (!Mhook_Unhook(&secondTrampoline))
+        return Fail("removing the second hook failed");
+    if (!Mhook_ReclaimRetired())
+        return Fail("Mhook_ReclaimRetired failed");
+
+    MHOOK_POOL_STATISTICS statistics = {};
+    if (!readPool(&statistics))
+        return Fail("reading the pool statistics failed");
+    if (statistics.activeTrampolines != 1 || statistics.retiredTrampolines != 0)
+        return Fail("reclaim did not leave exactly the active hook");
+    if (statistics.blockCount != 1)
+        return Fail("reclaim released the block of an active hook");
+
+    g_hookCalls = 0;
+    if (reinterpret_cast<TargetFn>(firstTarget)() != HOOK_RESULT || g_hookCalls != 1)
+        return Fail("the active hook stopped routing to its replacement");
+    if (reinterpret_cast<TargetFn>(firstTrampoline)() != TARGET_RESULT)
+        return Fail("the active trampoline stopped reaching the original");
+
+    if (!Mhook_Unhook(&firstTrampoline) || !Mhook_ReclaimRetired())
+        return Fail("removing and reclaiming the first hook failed");
+    if (!readPool(&statistics) || statistics.blockCount != 0)
+        return Fail("reclaiming the last hook did not release its block");
+
+    VirtualFree(firstTarget, 0, MEM_RELEASE);
+    return 0;
+}
+
+/**
+ * @brief Verifies that a thread stopped inside a retired trampoline makes reclaim fail as busy and change nothing.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseReclaimBusy(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+        return Fail("Mhook_SetHook failed");
+    const PBYTE retired = static_cast<PBYTE>(trampoline);
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed");
+
+    // A thread that never ran can be moved anywhere; this test's own suspension keeps it there.
+    g_stopThreads = 0;
+    HANDLE parked = CreateThread(NULL, 0, waitForStop, NULL, CREATE_SUSPENDED, NULL);
+    const char* failure = parked ? NULL : "CreateThread for the parked thread failed";
+
+    CONTEXT original = {};
+    original.ContextFlags = CONTEXT_CONTROL;
+    if (!failure && !GetThreadContext(parked, &original))
+        failure = "reading the parked thread's context failed";
+
+    if (!failure)
+    {
+        CONTEXT insideRetired = original;
+#ifdef _M_X64
+        insideRetired.Rip = reinterpret_cast<DWORD64>(retired + 1);
+#else
+        insideRetired.Eip = reinterpret_cast<DWORD>(retired + 1);
+#endif
+        if (!SetThreadContext(parked, &insideRetired))
+            failure = "moving the parked thread into the retired trampoline failed";
+    }
+
+    MHOOK_POOL_STATISTICS before = {};
+    if (!failure && !readPool(&before))
+        failure = "reading the pool statistics failed";
+
+    if (!failure)
+    {
+        const BOOL result = Mhook_ReclaimRetired();
+        MHOOK_POOL_STATISTICS after = {};
+
+        if (result)
+            failure = "reclaim succeeded with a thread inside a retired trampoline";
+        else if (Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
+            failure = "a thread inside a retired trampoline was not reported as busy";
+        else if (!readPool(&after))
+            failure = "reading the pool statistics after the busy reclaim failed";
+        else if (after.retiredTrampolines != before.retiredTrampolines || after.blockCount != before.blockCount)
+            failure = "a failed reclaim changed the pool";
+    }
+
+    if (parked)
+    {
+        InterlockedExchange(&g_stopThreads, 1);
+        if (!SetThreadContext(parked, &original) && !failure)
+            failure = "restoring the parked thread's context failed";
+    }
+
+    // With the thread moved out, the same reclaim succeeds.
+    MHOOK_POOL_STATISTICS reclaimed = {};
+    if (!failure && !Mhook_ReclaimRetired())
+        failure = "reclaim failed after the thread left the retired trampoline";
+    else if (!failure && (!readPool(&reclaimed) || reclaimed.retiredTrampolines != 0 || reclaimed.blockCount != 0))
+        failure = "the retried reclaim did not free the retired trampoline and its block";
+
+    if (parked)
+    {
+        ResumeThread(parked);
+        WaitForSingleObject(parked, INFINITE);
+        CloseHandle(parked);
+    }
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
+/**
+ * @brief Verifies that hook churn with reclaim does not grow the pool without bound.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseReclaimChurn(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    const SIZE_T cycles = Exhaustive() ? 1000 : 50;
+    MHOOK_POOL_STATISTICS statistics = {};
+
+    // Reclaiming after every removal keeps no block alive between cycles.
+    for (SIZE_T cycle = 0; cycle < cycles; ++cycle)
+    {
+        PVOID trampoline = target;
+        if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)) || !Mhook_Unhook(&trampoline))
+            return Fail("a hook and unhook cycle failed");
+        if (!Mhook_ReclaimRetired())
+            return Fail("Mhook_ReclaimRetired failed during churn");
+        if (!readPool(&statistics) || statistics.blockCount != 0)
+            return Fail("a reclaimed cycle left a pool block allocated");
+    }
+
+    // Deferring reclaim lets retired slots accumulate, and one reclaim frees them all.
+    for (SIZE_T cycle = 0; cycle < cycles; ++cycle)
+    {
+        PVOID trampoline = target;
+        if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)) || !Mhook_Unhook(&trampoline))
+            return Fail("a hook and unhook cycle failed");
+        if (!readPool(&statistics) || statistics.blockCount > 1)
+            return Fail("retired slots spilled into a second block before the first was full");
+    }
+    if (!readPool(&statistics) || statistics.retiredTrampolines != cycles)
+        return Fail("deferred removals were not all counted as retired");
+
+    if (!Mhook_ReclaimRetired())
+        return Fail("the deferred Mhook_ReclaimRetired failed");
+    if (!readPool(&statistics) || statistics.retiredTrampolines || statistics.blockCount || statistics.reservedBytes)
+        return Fail("one reclaim did not free every deferred retired trampoline");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+/**
+ * @brief Verifies that reclaim releases a block a failed batch left empty, with nothing retired.
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseReclaimEmptyBlock(void)
+{
+    PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
+    if (!target)
+        return Fail("VirtualAlloc for the target buffer failed");
+
+    // The first request allocates a block in prepare; the second fails there, and the batch gives the slot back.
+    PVOID firstSlot = target;
+    PVOID secondSlot = target;
+    MHOOK_HOOK_INFO hooks[] = {
+        {&firstSlot, reinterpret_cast<PVOID>(&HookCounting), MHOOK_STATUS_SUCCESS},
+        {&secondSlot, NULL, MHOOK_STATUS_SUCCESS}
+    };
+    if (Mhook_SetHookBatch(hooks, ARRAYSIZE(hooks)))
+        return Fail("a batch with a NULL hook function succeeded");
+    if (hooks[0].status != MHOOK_STATUS_SUCCESS || hooks[1].status != MHOOK_STATUS_INVALID_ARGUMENT)
+        return Fail("the batch did not fail in prepare on its second request");
+
+    MHOOK_POOL_STATISTICS statistics = {};
+    if (!readPool(&statistics))
+        return Fail("reading the pool statistics after the failed batch failed");
+    if (statistics.blockCount != 1 || statistics.activeTrampolines || statistics.retiredTrampolines)
+        return Fail("the failed batch did not leave exactly one empty block");
+
+    if (!Mhook_ReclaimRetired() || Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("Mhook_ReclaimRetired failed with nothing retired");
+    if (!readPool(&statistics) || statistics.blockCount != 0 || statistics.reservedBytes != 0)
+        return Fail("reclaim did not release the empty block");
+
+    VirtualFree(target, 0, MEM_RELEASE);
+    return 0;
+}
+
+/**
+ * @brief Verifies that a target with no free memory below it gets its block from the other side of the search.
+ *
+ * The target takes the lowest free granule, so every granule below it is in use, and every free granule from
+ * there up to twice its address plus one granule is reserved. When the downward half of the search reaches
+ * address zero it has made as many steps as the upward half, which by then has only seen reserved granules
+ * below twice the target's address. A search that ends when either side leaves the range therefore fails, and
+ * one that keeps going on the other side finds a block above twice the target's address. The test builds this
+ * layout itself, so the result does not depend on where the loader placed anything.
+ *
+ * @return Zero on success; otherwise a test failure code.
+ */
+static int caseLowTarget(void)
+{
+    SYSTEM_INFO info = {};
+    GetSystemInfo(&info);
+    const uintptr_t granule = info.dwAllocationGranularity;
+
+    // Stay in the low gigabyte, so twice the target is still a user address on x86.
+    static const uintptr_t kSearchLimit = 0x40000000;
+    PBYTE target = NULL;
+    for (uintptr_t address = granule; address < kSearchLimit && !target; address += granule)
+        target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet), reinterpret_cast<PVOID>(address));
+    if (!target)
+        return Fail("no free granule in the low gigabyte could hold the target");
+
+    const uintptr_t targetAddress = reinterpret_cast<uintptr_t>(target);
+    std::vector<PVOID> reservations;
+    for (uintptr_t address = granule; address <= 2 * targetAddress + granule; address += granule)
+    {
+        PVOID reservation = VirtualAlloc(reinterpret_cast<PVOID>(address), granule, MEM_RESERVE, PAGE_NOACCESS);
+        if (reservation)
+            reservations.push_back(reservation);
+    }
+
+    const char* failure = NULL;
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+    {
+        failure = "Mhook_SetHook failed for a target with free memory only above it";
+    }
+    else
+    {
+        g_hookCalls = 0;
+        if (reinterpret_cast<TargetFn>(target)() != HOOK_RESULT || g_hookCalls != 1)
+            failure = "calling the low target did not reach the hook";
+        else if (reinterpret_cast<TargetFn>(trampoline)() != TARGET_RESULT)
+            failure = "calling the trampoline did not reach the original";
+        else if (reinterpret_cast<uintptr_t>(trampoline) <= 2 * targetAddress)
+            failure = "the trampoline does not lie above the reserved granules";
+
+        if (!Mhook_Unhook(&trampoline) && !failure)
+            failure = "Mhook_Unhook failed";
+        else if (!Mhook_ReclaimRetired() && !failure)
+            failure = "Mhook_ReclaimRetired failed";
+    }
+
+    for (size_t index = 0; index < reservations.size(); ++index)
+        VirtualFree(reservations[index], 0, MEM_RELEASE);
+    VirtualFree(target, 0, MEM_RELEASE);
+
+    if (failure)
+        return Fail(failure);
+    return 0;
+}
+
 struct TestCase
 {
     const char* name;
@@ -2296,7 +3036,17 @@ static const TestCase kCases[] = {
     {"reuse", CaseReuse},
 #ifdef _M_X64
     {"pool", caseTrampolinePoolBookkeeping},
+    {"block_protection_refused", caseBlockProtectionRefused},
 #endif // _M_X64
+    {"pool_statistics", casePoolStatistics},
+    {"stranded_rollback", caseStrandedRollback},
+    {"trampoline_protection", caseTrampolineProtection},
+    {"protection_failure", caseProtectionFailure},
+    {"reclaim_keeps_active", caseReclaimKeepsActive},
+    {"reclaim_busy", caseReclaimBusy},
+    {"reclaim_churn", caseReclaimChurn},
+    {"reclaim_empty_block", caseReclaimEmptyBlock},
+    {"low_target", caseLowTarget},
     {"sweep", CaseSweep},
 };
 

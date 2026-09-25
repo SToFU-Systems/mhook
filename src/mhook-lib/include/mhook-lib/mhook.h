@@ -53,9 +53,10 @@ extern "C"
 /**
  * @brief Identifies the detailed result of a hook operation.
  *
- * Mhook_SetHook() and Mhook_Unhook() store one of these values for the calling
- * thread. The value describes the first detected internal failure unless a
- * later failure determines that the operation itself cannot complete.
+ * Mhook_SetHook(), Mhook_Unhook(), their batch forms, and
+ * Mhook_ReclaimRetired() store one of these values for the calling thread. The
+ * value describes the first detected internal failure unless a later failure
+ * determines that the operation itself cannot complete.
  * MHOOK_STATUS_THREAD_RESUME_FAILED is the one status that can accompany a
  * successful operation.
  *
@@ -114,7 +115,7 @@ typedef enum MHOOK_STATUS
     MHOOK_STATUS_THREAD_ACCESS_DENIED = 16,
 
     /**
-     * A peer kept executing the code being patched, was still exiting, or new threads kept
+     * A peer kept executing the code being patched or freed, was still exiting, or new threads kept
      * starting. Nothing was changed, and the operation may succeed if retried.
      */
     MHOOK_STATUS_THREAD_BUSY = 17,
@@ -143,6 +144,35 @@ typedef struct MHOOK_HOOK_INFO
     /** Result written for this request by the most recent batch operation. */
     MHOOK_STATUS status;
 } MHOOK_HOOK_INFO;
+
+/**
+ * @brief Describes the trampoline pool at one moment.
+ *
+ * Every trampoline occupies one code slot in a pool block. A slot is free,
+ * active (its hook is installed), retired (its hook was removed, but its code
+ * stays valid until Mhook_ReclaimRetired() frees it), or stranded (a failed
+ * installation could not restore its target, so the slot is kept for good).
+ */
+typedef struct MHOOK_POOL_STATISTICS
+{
+    /** Slots backing installed hooks. */
+    SIZE_T activeTrampolines;
+
+    /** Slots of removed hooks, waiting for Mhook_ReclaimRetired(). */
+    SIZE_T retiredTrampolines;
+
+    /** Slots kept because a failed installation could not restore its target. */
+    SIZE_T strandedTrampolines;
+
+    /** Unused slots in allocated blocks. */
+    SIZE_T freeTrampolines;
+
+    /** Pool blocks currently allocated. */
+    SIZE_T blockCount;
+
+    /** Bytes of address space held by pool blocks. */
+    SIZE_T reservedBytes;
+} MHOOK_POOL_STATISTICS;
 
 /**
  * @name Error codes reported through GetLastError()
@@ -219,8 +249,10 @@ BOOL Mhook_SetHookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
  *         preserve GetLastError. Otherwise it is MHOOK_ERROR_TARGET_MODIFIED,
  *         MHOOK_ERROR_NOT_HOOKED, or the code from the failed VirtualProtect.
  *
- * @warning The trampoline is not freed, since a thread may still be running in
- *          it, but it must not be called once this returns TRUE.
+ * @warning The trampoline is retired, not freed: code that loaded it earlier
+ *          may still call it and reach the original function. It is freed by
+ *          Mhook_ReclaimRetired(), after which it must not be called or
+ *          passed to any Mhook function.
  */
 BOOL Mhook_Unhook(PVOID* ppHookedFunction);
 
@@ -237,12 +269,42 @@ BOOL Mhook_Unhook(PVOID* ppHookedFunction);
  * cause the failure; it was not removed. The failing entry carries the
  * diagnostic status, which is also returned by Mhook_GetLastStatus().
  *
+ * Removed trampolines are retired as with Mhook_Unhook(), and freed by
+ * Mhook_ReclaimRetired().
+ *
  * @param[in,out] hooks Requests to remove and storage for their results.
  *        pHookFunction is ignored.
  * @param[in]     hookCount Number of descriptors in hooks.
  * @return TRUE when every hook was removed; otherwise FALSE.
  */
 BOOL Mhook_UnhookBatch(MHOOK_HOOK_INFO* hooks, SIZE_T hookCount);
+
+
+/**
+ * @brief Frees the trampolines of removed hooks and releases pool memory that
+ *        no installed hook uses.
+ *
+ * A removed hook's trampoline stays valid after Mhook_Unhook(), because code
+ * that loaded the trampoline pointer earlier may still call it. This call
+ * frees every such retired trampoline at once, then releases each pool block
+ * left without trampolines. Installed hooks are not affected. With no hooks
+ * installed, it releases every block that holds no stranded trampoline.
+ *
+ * @warning The caller must guarantee that no thread will call any trampoline
+ *          removed so far, including hook functions that are still running and
+ *          may already have loaded one. Mhook checks only that no thread is
+ *          executing inside a retired trampoline at this moment. Reclaimed
+ *          trampoline addresses may be handed out again to later hooks, so
+ *          stale copies must not be passed to any Mhook call.
+ *
+ * @return TRUE when every retired trampoline was freed. On success the
+ *         caller's GetLastError value is preserved.
+ * @retval FALSE Nothing was freed. Mhook_GetLastStatus() is
+ *         MHOOK_STATUS_THREAD_BUSY when a thread was executing inside a retired
+ *         trampoline, so a retry may succeed, or another thread coordination
+ *         status. GetLastError describes the thread failure.
+ */
+BOOL Mhook_ReclaimRetired(void);
 
 
 /**
@@ -261,14 +323,32 @@ PVOID Mhook_GetTarget(PVOID pHookedFunction);
 
 
 /**
+ * @brief Reports the current state of the trampoline pool.
+ *
+ * The counts are taken under the lock that serializes every hook operation,
+ * so they describe one consistent moment and match the pool's real
+ * allocations.
+ *
+ * @param[out] statistics Receives the counts.
+ * @return TRUE on success. FALSE with ERROR_INVALID_PARAMETER when statistics
+ *         is NULL.
+ *
+ * @note Unlike the set and unhook operations, this does not change the status
+ *       Mhook_GetLastStatus() reports.
+ */
+BOOL Mhook_GetPoolStatistics(MHOOK_POOL_STATISTICS* statistics);
+
+
+/**
  * @brief Returns the detailed status of the calling thread's most recent hook
- *        installation or removal.
+ *        installation, removal, or reclaim.
  *
  * Each thread owns an independent status initialized to MHOOK_STATUS_SUCCESS.
- * Reading the value does not clear it. The next set or unhook operation on the
- * same thread replaces it, so callers that need a diagnostic should retrieve
- * it immediately after the operation. For a batch operation, this reports the
- * overall result; each descriptor reports its own result through status.
+ * Reading the value does not clear it. The next set, unhook, or reclaim
+ * operation on the same thread replaces it, so callers that need a diagnostic
+ * should retrieve it immediately after the operation. For a batch operation,
+ * this reports the overall result; each descriptor reports its own result
+ * through status.
  *
  * @return One of the MHOOK_STATUS values describing the latest operation on
  *         the calling thread.
