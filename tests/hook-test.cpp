@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <atomic>
 #include <vector>
 #include "mhook-lib/mhook.h"
 
@@ -953,19 +954,6 @@ static int CaseShortFunc(void)
 }
 
 static volatile LONG g_stopThreads = 0;
-static volatile LONG g_badResults = 0;
-
-static DWORD WINAPI SpinCallingTarget(LPVOID parameter)
-{
-    TargetFn target = (TargetFn)parameter;
-    while (!g_stopThreads)
-    {
-        const int result = target();
-        if (result != TARGET_RESULT && result != HOOK_RESULT)
-            InterlockedIncrement(&g_badResults);
-    }
-    return 0;
-}
 
 /**
  * @brief Verifies that a preparation failure leaves every batch hook unpublished.
@@ -1420,96 +1408,167 @@ static BOOL disableDebugPrivilege(void)
     return result;
 }
 
-static int CaseThreads(void)
+namespace
 {
-    const int kWorkerCount = 4;
-    const int kRoundCount = 25;
-    const int kOperationRetryCount = 16;
+    struct ThreadStressWorker
+    {
+        TargetFn target;
+        const std::atomic<bool>* stop;
+        uint64_t originalCalls;
+        uint64_t hookedCalls;
+        uint64_t invalidCalls;
+    };
+
+    /**
+     * @brief Counts the results of calls made while the test changes the hook.
+     */
+    DWORD WINAPI spinCallingTarget(_Inout_ LPVOID parameter)
+    {
+        auto* worker = static_cast<ThreadStressWorker*>(parameter);
+        while (!worker->stop->load(std::memory_order_relaxed))
+        {
+            const int result = worker->target();
+            if (result == TARGET_RESULT)
+                ++worker->originalCalls;
+            else if (result == HOOK_RESULT)
+                ++worker->hookedCalls;
+            else
+                ++worker->invalidCalls;
+        }
+        return 0;
+    }
+} // namespace
+
+/**
+ * @brief Exercises repeated hook installation and removal with live callers.
+ */
+static int caseThreads(void)
+{
+    constexpr DWORD kWorkerCount = 4;
+    constexpr uint32_t kShortRounds = 25;
+    constexpr uint32_t kLongRounds = 100;
+    constexpr uint32_t kMaxAttempts = 16;
 
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
     if (!target)
-        return Fail("VirtualAlloc for the target buffer failed");
+        return Fail("allocating the stress target failed");
 
-    g_stopThreads = 0;
-    g_badResults = 0;
-
+    // Keep the worker arguments alive if a join fails and the process exits.
+    static std::atomic<bool> stop = {false};
+    static ThreadStressWorker workers[kWorkerCount] = {};
     HANDLE threads[kWorkerCount] = {};
-    for (int i = 0; i < kWorkerCount; ++i)
+    const ULONGLONG started = GetTickCount64();
+    DWORD created = 0;
+    for (; created < kWorkerCount; ++created)
     {
-        threads[i] = CreateThread(NULL, 0, SpinCallingTarget, target, 0, NULL);
-        if (!threads[i])
+        workers[created].target = reinterpret_cast<TargetFn>(target);
+        workers[created].stop = &stop;
+        threads[created] = CreateThread(nullptr, 0, spinCallingTarget, &workers[created], 0, nullptr);
+        if (!threads[created])
         {
-            // Stop and join whatever already started before bailing out, so the
-            // case never returns while threads are still running on the buffer.
-            InterlockedExchange(&g_stopThreads, 1);
-            if (i > 0)
-            {
-                WaitForMultipleObjects((DWORD)i, threads, TRUE, INFINITE);
-                for (int j = 0; j < i; ++j)
-                    CloseHandle(threads[j]);
-            }
-            return Fail("CreateThread failed");
+            fprintf(stderr, "threads: CreateThread failed, error=%lu\n", GetLastError());
+            break;
         }
     }
 
-    int status = 0;
     PVOID trampoline = target;
-    const int rounds = Exhaustive() ? 100 : kRoundCount;
-
-    // Complete every round while workers repeatedly enter the patch range.
-    for (int round = 0; round < rounds && status == 0; ++round)
+    uint32_t retries = 0;
+    const auto changeHook = [&](bool install, uint32_t round)
     {
-        BOOL hookResult = FALSE;
-        for (int attempt = 0; attempt < kOperationRetryCount && !hookResult; ++attempt)
+        const char* operation = install ? "install" : "remove";
+        const PVOID previousSlot = trampoline;
+        BOOL changed = FALSE;
+        MHOOK_STATUS status = MHOOK_STATUS_SUCCESS;
+        uint32_t attempts = 0;
+
+        // Report where the test is before calling an operation that could hang.
+        fprintf(stderr, "threads round %u: %s\n", round, operation);
+        fflush(stderr);
+        do
         {
-            hookResult = Mhook_SetHook(&trampoline, (PVOID)&HookCounting);
-            if (!hookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
-                status = Fail("Mhook_SetHook failed unexpectedly while other threads were running");
-            else if (!hookResult && trampoline != target)
-                status = Fail("a suspended-thread collision changed the caller slot");
-
-            if (status != 0)
-                break;
+            ++attempts;
+            changed = install ? Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting))
+                              : Mhook_Unhook(&trampoline);
+            status = Mhook_GetLastStatus();
         }
+        while (!changed && status == MHOOK_STATUS_THREAD_BUSY && trampoline == previousSlot && attempts < kMaxAttempts);
 
-        if (status != 0)
-            break;
-        if (!hookResult)
-        {
-            status = Fail("Mhook_SetHook could not safely suspend all peer threads");
-            break;
-        }
+        retries += attempts - 1;
+        if (changed && status == MHOOK_STATUS_SUCCESS)
+            return true;
 
-        BOOL unhookResult = FALSE;
-        for (int attempt = 0; attempt < kOperationRetryCount && !unhookResult; ++attempt)
-        {
-            unhookResult = Mhook_Unhook(&trampoline);
-            if (!unhookResult && Mhook_GetLastStatus() != MHOOK_STATUS_THREAD_BUSY)
-                status = Fail("Mhook_Unhook failed unexpectedly while other threads were running");
-            else if (!unhookResult && trampoline == target)
-                status = Fail("a suspended-thread collision published a failed unhook");
+        fprintf(
+            stderr,
+            "threads round %u: %s failed on attempt %u, status=%d\n",
+            round,
+            operation,
+            attempts,
+            static_cast<int>(status)
+        );
+        return false;
+    };
 
-            if (status != 0)
-                break;
-        }
-
-        if (status == 0 && !unhookResult)
-            status = Fail("Mhook_Unhook could not safely suspend all peer threads");
+    // Workers keep calling throughout the install/remove loop.
+    const uint32_t rounds = Exhaustive() ? kLongRounds : kShortRounds;
+    uint32_t completed = 0;
+    bool passed = created == kWorkerCount;
+    while (passed && completed < rounds)
+    {
+        const uint32_t round = completed + 1;
+        passed = changeHook(true, round) && changeHook(false, round);
+        if (passed)
+            ++completed;
     }
 
-    InterlockedExchange(&g_stopThreads, 1);
-    WaitForMultipleObjects(kWorkerCount, threads, TRUE, INFINITE);
-    for (int i = 0; i < kWorkerCount; ++i)
-        CloseHandle(threads[i]);
+    // Join before reading the worker totals or releasing the target.
+    fprintf(stderr, "threads: joining workers\n");
+    fflush(stderr);
+    stop.store(true, std::memory_order_relaxed);
+    if (created != 0 && WaitForMultipleObjects(created, threads, TRUE, INFINITE) != WAIT_OBJECT_0)
+        return Fail("joining the stress workers failed");
 
-    // Restore a hook left installed only because the stress case itself failed.
-    if (trampoline != target)
-        Mhook_Unhook(&trampoline);
+    uint64_t originalCalls = 0;
+    uint64_t hookedCalls = 0;
+    uint64_t invalidCalls = 0;
+    for (DWORD index = 0; index < created; ++index)
+    {
+        originalCalls += workers[index].originalCalls;
+        hookedCalls += workers[index].hookedCalls;
+        invalidCalls += workers[index].invalidCalls;
+        if (!CloseHandle(threads[index]))
+        {
+            fprintf(stderr, "threads: CloseHandle failed, error=%lu\n", GetLastError());
+            passed = false;
+        }
+    }
 
-    if (status != 0)
-        return status;
-    if (g_badResults != 0)
-        return Fail("a thread observed a result from neither the target nor the hook");
+    fprintf(
+        stderr,
+        "threads: rounds=%u/%u retries=%u original=%llu hooked=%llu invalid=%llu elapsed-ms=%llu\n",
+        completed,
+        rounds,
+        retries,
+        originalCalls,
+        hookedCalls,
+        invalidCalls,
+        GetTickCount64() - started
+    );
+
+    // A failed round may leave a hook installed.
+    if (trampoline != target && !changeHook(false, completed + 1))
+        return 1;
+    if (!Mhook_ReclaimRetired() || Mhook_GetLastStatus() != MHOOK_STATUS_SUCCESS)
+        return Fail("reclaiming the stress trampolines failed");
+    if (!VirtualFree(target, 0, MEM_RELEASE))
+        return Fail("releasing the stress target failed");
+
+    if (!passed)
+        return 1;
+    if (invalidCalls != 0)
+        return Fail("a worker received an unexpected return value");
+    if (originalCalls == 0 || hookedCalls == 0)
+        return Fail("workers did not exercise both call paths");
+
     return 0;
 }
 
@@ -3358,7 +3417,7 @@ static const TestCase kCases[] = {
     {"thunk", CaseThunk},
     {"snapshot_boundary", CaseSnapshotBoundary},
     {"short_func", CaseShortFunc},
-    {"threads", CaseThreads},
+    {"threads", caseThreads},
     {"suspend_failure", caseSuspensionFailure},
     {"first_use_race", caseFirstUseRace},
     {"late_thread", caseLateThread},
