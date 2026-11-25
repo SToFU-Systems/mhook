@@ -194,6 +194,86 @@ static int CaseTrampoline(void)
     return 0;
 }
 
+/**
+ * @brief Reads the destination of a direct or indirect trampoline jump.
+ * @return The destination address, or zero when the jump cannot be read.
+ */
+static uintptr_t readJumpDestination(const BYTE* jump)
+{
+    constexpr BYTE kNearJumpOpcode = 0xE9;
+    const bool isDirect = jump[0] == kNearJumpOpcode;
+    constexpr BYTE kIndirectJump[] = {0xFF, 0x25};
+    if (!isDirect && memcmp(jump, kIndirectJump, sizeof(kIndirectJump)) != 0)
+        return 0;
+
+    // A direct jump uses a signed displacement from the end of the instruction.
+    const size_t opcodeSize = isDirect ? sizeof(kNearJumpOpcode) : sizeof(kIndirectJump);
+    int32_t displacement = 0;
+    memcpy(&displacement, jump + opcodeSize, sizeof(displacement));
+    const uintptr_t nextAddress = reinterpret_cast<uintptr_t>(jump + opcodeSize + sizeof(displacement));
+    const uintptr_t relativeAddress = nextAddress + static_cast<uintptr_t>(displacement);
+    if (isDirect)
+        return relativeAddress;
+
+    // An indirect jump uses a pointer slot addressed relative to RIP on x64 and absolutely on x86.
+#ifdef _M_X64
+    const uintptr_t slotAddress = relativeAddress;
+#else
+    const uintptr_t slotAddress = static_cast<uint32_t>(displacement);
+#endif
+
+    const void* slot = reinterpret_cast<const void*>(slotAddress);
+    uintptr_t destination = 0;
+    SIZE_T bytesRead = 0;
+    const BOOL readOk = ReadProcessMemory(GetCurrentProcess(), slot, &destination, sizeof(destination), &bytesRead);
+    if (!readOk || bytesRead != sizeof(destination))
+        return 0;
+
+    return destination;
+}
+
+#ifdef _M_IX86
+/**
+ * @brief Verifies that an x86 prologue crossing the patch length is copied as whole instructions.
+ */
+static int caseX86RelocationSpan(void)
+{
+    // pushad (1 byte), add eax, 1 (5 bytes), popad, ret.
+    constexpr BYTE kCode[] = {0x60, 0x05, 0x01, 0x00, 0x00, 0x00, 0x61, 0xC3};
+    PBYTE target = AllocCodeBuffer(kCode, sizeof(kCode));
+    if (!target)
+        return Fail("allocating the x86 prologue failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+    {
+        if (!VirtualFree(target, 0, MEM_RELEASE))
+            return Fail("releasing the x86 prologue failed");
+
+        return Fail("Mhook_SetHook rejected the x86 prologue");
+    }
+
+    // Check both copied instructions and the jump back to popad.
+    const BYTE* emitted = static_cast<const BYTE*>(trampoline);
+    constexpr size_t kCopiedSize = 6;
+    const char* failure = nullptr;
+    if (memcmp(emitted, kCode, kCopiedSize) != 0)
+        failure = "the x86 trampoline did not copy both whole instructions";
+    else if (readJumpDestination(emitted + kCopiedSize) != reinterpret_cast<uintptr_t>(target + kCopiedSize))
+        failure = "the x86 trampoline did not resume at popad";
+
+    // Remove the hook before releasing the trampoline and target.
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("removing the x86 hook failed");
+    if (!Mhook_ReclaimRetired() && !failure)
+        failure = "reclaiming the x86 trampoline failed";
+    if (!VirtualFree(target, 0, MEM_RELEASE) && !failure)
+        failure = "releasing the x86 prologue failed";
+
+    return failure ? Fail(failure) : 0;
+}
+#endif // _M_IX86
+
 #ifdef _M_X64
 constexpr size_t kRipRelativeDataOffset = 16;
 
@@ -204,38 +284,6 @@ struct RipRelativeFixture
     size_t resumeOffset;
     BYTE code[kRipRelativeDataOffset + sizeof(uint64_t)];
 };
-
-/**
- * @brief Reads the destination of a direct or RIP-relative indirect x64 jump.
- * @return The destination address, or zero when the jump cannot be read.
- */
-static uintptr_t readX64JumpDestination(const BYTE* jump)
-{
-    constexpr BYTE kNearJumpOpcode = 0xE9;
-    const bool isDirect = jump[0] == kNearJumpOpcode;
-    constexpr BYTE kIndirectJump[] = {0xFF, 0x25};
-    if (!isDirect && memcmp(jump, kIndirectJump, sizeof(kIndirectJump)) != 0)
-        return 0;
-
-    // Both forms use a signed displacement measured from the end of the jump instruction.
-    const size_t opcodeSize = isDirect ? sizeof(kNearJumpOpcode) : sizeof(kIndirectJump);
-    int32_t displacement = 0;
-    memcpy(&displacement, jump + opcodeSize, sizeof(displacement));
-    const uintptr_t nextAddress = reinterpret_cast<uintptr_t>(jump + opcodeSize + sizeof(displacement));
-    const uintptr_t relativeAddress = nextAddress + static_cast<uintptr_t>(displacement);
-    if (isDirect)
-        return relativeAddress;
-
-    // The indirect form points to a slot that holds the destination address.
-    const void* slot = reinterpret_cast<const void*>(relativeAddress);
-    uintptr_t destination = 0;
-    SIZE_T bytesRead = 0;
-    const BOOL readOk = ReadProcessMemory(GetCurrentProcess(), slot, &destination, sizeof(destination), &bytesRead);
-    if (!readOk || bytesRead != sizeof(destination))
-        return 0;
-
-    return destination;
-}
 
 /**
  * @brief Verifies the relocated memory reference and the jump back without executing the trampoline.
@@ -271,7 +319,7 @@ static int expectRipRelativeRelocation(const RipRelativeFixture& fixture)
         failure = "the trampoline changed the instructions before the load displacement";
     else if (dataAddress != reinterpret_cast<uintptr_t>(target + kRipRelativeDataOffset))
         failure = "the relocated instruction points at the wrong data";
-    else if (readX64JumpDestination(emitted + fixture.resumeOffset) !=
+    else if (readJumpDestination(emitted + fixture.resumeOffset) !=
              reinterpret_cast<uintptr_t>(target + fixture.resumeOffset))
         failure = "the trampoline does not resume at the first untouched instruction";
 
@@ -3146,6 +3194,9 @@ static const TestCase kCases[] = {
     {"thread_busy", caseThreadBusy},
     {"resume_failure", caseResumeFailure},
     {"reuse", CaseReuse},
+#ifdef _M_IX86
+    {"x86_relocation_span", caseX86RelocationSpan},
+#endif // _M_IX86
 #ifdef _M_X64
     {"rip_relative_relocation", caseRipRelativeRelocation},
     {"pool", caseTrampolinePoolBookkeeping},

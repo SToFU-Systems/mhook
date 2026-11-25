@@ -195,6 +195,9 @@ if(MHOOK_ARCHITECTURE STREQUAL "x64")
     set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
     add_test(NAME mhook.hook.block_protection_refused COMMAND mhook-hook-test block_protection_refused)
     set_tests_properties(mhook.hook.block_protection_refused PROPERTIES TIMEOUT 15)
+elseif(MHOOK_ARCHITECTURE STREQUAL "x86")
+    add_test(NAME mhook.hook.x86_relocation_span COMMAND mhook-hook-test x86_relocation_span)
+    set_tests_properties(mhook.hook.x86_relocation_span PROPERTIES TIMEOUT 15)
 endif()
 
 # Every hook and unhook pair costs at least two system wide thread snapshots in the
