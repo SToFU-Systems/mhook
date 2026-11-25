@@ -392,6 +392,56 @@ static int caseInvalidSetDecodeBoundary(void)
 }
 
 /**
+ * @brief Verifies that unsupported control transfers are rejected inside the copied span.
+ */
+static int caseUnsupportedPrologueControlTransfer(void)
+{
+    constexpr size_t kCodeSize = 8;
+
+    struct PrologueCase
+    {
+        const char* name;
+        BYTE code[kCodeSize];
+    };
+
+    // Start with a nop so the transfer is in the prologue being relocated.
+    constexpr PrologueCase kCases[] = {
+        // nop, call rel32 +1, ret, ret
+        {"relative call in prologue", {0x90, 0xE8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0xC3}},
+        // nop, jmp rel32 +1, nop, ret
+        {"unconditional jump in prologue", {0x90, 0xE9, 0x01, 0x00, 0x00, 0x00, 0x90, 0xC3}},
+        // nop, jne rel8 +4, nop, nop, nop, nop, ret
+        {"conditional jump in prologue", {0x90, 0x75, 0x04, 0x90, 0x90, 0x90, 0x90, 0xC3}},
+    };
+
+    for (const PrologueCase& test : kCases)
+    {
+        const SIZE_T size = sizeof(test.code);
+        PBYTE target = static_cast<PBYTE>(VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!target)
+            return Fail("allocating the unsupported prologue failed");
+
+        // Reuse the checks for the return value, status, caller pointer, and target bytes.
+        memcpy(target, test.code, size);
+        int result = 0;
+        if (makeMemoryExecutable(target, size))
+        {
+            const PVOID replacement = reinterpret_cast<PVOID>(&HookReplacement);
+            result = expectInvalidSet(target, replacement, MHOOK_STATUS_UNSUPPORTED_PROLOGUE, target, test.code, size);
+        }
+        else
+            result = Fail("making the unsupported prologue executable failed");
+
+        if (!VirtualFree(target, 0, MEM_RELEASE))
+            return Fail("releasing the unsupported prologue failed");
+        if (result != 0)
+            return Fail(test.name);
+    }
+
+    return 0;
+}
+
+/**
  * @brief Verifies that an inaccessible indirect thunk slot is rejected safely.
  * @return Zero on success; otherwise a test failure code.
  */
@@ -1188,6 +1238,7 @@ static const StatusTestCase kStatusTestCases[] = {
     {"invalid_set_hook_access", caseInvalidSetHookAccess},
     {"invalid_set_thunk_boundary", caseInvalidSetThunkBoundary},
     {"invalid_set_decode_boundary", caseInvalidSetDecodeBoundary},
+    {"unsupported_prologue_control_transfer", caseUnsupportedPrologueControlTransfer},
     {"invalid_set_thunk_indirect", caseInvalidSetThunkIndirect},
     {"invalid_set_thunk_cycle", caseInvalidSetThunkCycle},
     {"invalid_set_thunk_depth", caseInvalidSetThunkDepth},

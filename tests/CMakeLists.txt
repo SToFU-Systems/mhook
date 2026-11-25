@@ -18,6 +18,7 @@ set(statusCases
     invalid_set_hook_access
     invalid_set_thunk_boundary
     invalid_set_decode_boundary
+    unsupported_prologue_control_transfer
     invalid_set_thunk_indirect
     invalid_set_thunk_cycle
     invalid_set_thunk_depth
