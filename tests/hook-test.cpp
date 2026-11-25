@@ -280,7 +280,7 @@ constexpr size_t kRipRelativeDataOffset = 16;
 struct RipRelativeFixture
 {
     const char* name;
-    size_t loadOffset;
+    size_t instructionOffset;
     size_t resumeOffset;
     BYTE code[kRipRelativeDataOffset + sizeof(uint64_t)];
 };
@@ -303,22 +303,22 @@ static int expectRipRelativeRelocation(const RipRelativeFixture& fixture)
         return Fail("Mhook_SetHook rejected the RIP-relative prologue");
     }
 
-    // Read the displaced instruction's new memory reference.
+    // Read the relocated displacement and calculate the address it produces.
     const BYTE* emitted = static_cast<const BYTE*>(trampoline);
-    const BYTE* relocatedLoad = emitted + fixture.loadOffset;
+    const BYTE* relocatedInstruction = emitted + fixture.instructionOffset;
     constexpr size_t kDisplacementOffset = 3;
-    int32_t dataDisplacement = 0;
-    memcpy(&dataDisplacement, relocatedLoad + kDisplacementOffset, sizeof(dataDisplacement));
-    constexpr size_t kLoadSize = 7;
-    const uintptr_t addressAfterLoad = reinterpret_cast<uintptr_t>(relocatedLoad + kLoadSize);
-    const uintptr_t dataAddress = addressAfterLoad + static_cast<uintptr_t>(dataDisplacement);
+    int32_t displacement = 0;
+    memcpy(&displacement, relocatedInstruction + kDisplacementOffset, sizeof(displacement));
+    constexpr size_t kInstructionSize = 7;
+    const uintptr_t addressAfterInstruction = reinterpret_cast<uintptr_t>(relocatedInstruction + kInstructionSize);
+    const uintptr_t referencedAddress = addressAfterInstruction + static_cast<uintptr_t>(displacement);
 
     // Use the fixture's original layout to check the relocated instructions and both destinations.
     const char* failure = nullptr;
-    if (memcmp(emitted, fixture.code, fixture.loadOffset + kDisplacementOffset) != 0)
-        failure = "the trampoline changed the instructions before the load displacement";
-    else if (dataAddress != reinterpret_cast<uintptr_t>(target + kRipRelativeDataOffset))
-        failure = "the relocated instruction points at the wrong data";
+    if (memcmp(emitted, fixture.code, fixture.instructionOffset + kDisplacementOffset) != 0)
+        failure = "the trampoline changed the instructions before the RIP-relative displacement";
+    else if (referencedAddress != reinterpret_cast<uintptr_t>(target + kRipRelativeDataOffset))
+        failure = "the relocated instruction refers to a different address";
     else if (readJumpDestination(emitted + fixture.resumeOffset) !=
              reinterpret_cast<uintptr_t>(target + fixture.resumeOffset))
         failure = "the trampoline does not resume at the first untouched instruction";
@@ -335,15 +335,22 @@ static int expectRipRelativeRelocation(const RipRelativeFixture& fixture)
 }
 
 /**
- * @brief Covers a RIP-relative load at the entry and after a whole instruction.
+ * @brief Covers RIP-relative loads, stores, and address calculations.
  */
 static int caseRipRelativeRelocation(void)
 {
     constexpr RipRelativeFixture kFixtures[] = {
-        // mov rax, [rip + 9]; ret.
+        // mov rax, [rip + 9]; ret
         {"load at entry", 0, 7, {0x48, 0x8B, 0x05, 0x09, 0x00, 0x00, 0x00, 0xC3}},
-        // xor eax, eax; mov rax, [rip + 7]; ret.
+
+        // xor eax, eax; mov rax, [rip + 7]; ret
         {"load after xor", 2, 9, {0x33, 0xC0, 0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00, 0xC3}},
+
+        // mov [rip + 9], rax; ret
+        {"store at entry", 0, 7, {0x48, 0x89, 0x05, 0x09, 0x00, 0x00, 0x00, 0xC3}},
+
+        // lea rax, [rip + 9]; ret
+        {"lea at entry", 0, 7, {0x48, 0x8D, 0x05, 0x09, 0x00, 0x00, 0x00, 0xC3}},
     };
 
     for (const RipRelativeFixture& fixture : kFixtures)
