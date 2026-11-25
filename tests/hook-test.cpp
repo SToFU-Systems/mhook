@@ -15,6 +15,7 @@
 //================================================================================
 
 #include <windows.h>
+#include <winternl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -191,6 +192,171 @@ static int CaseTrampoline(void)
         return Fail("the hook ran a number of times other than once");
 
     Mhook_Unhook(&g_trampoline);
+    return 0;
+}
+
+namespace
+{
+    using NativeAllocate = NTSTATUS(NTAPI*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
+
+    struct NativeAllocationRequest
+    {
+        static constexpr SIZE_T kRequestedSize = 1;
+        static constexpr ULONG_PTR kZeroBits = 0;
+        static constexpr ULONG kAllocationType = MEM_RESERVE | MEM_COMMIT;
+
+        HANDLE process;
+        PVOID baseAddress;
+        SIZE_T regionSize;
+        uint32_t hookCalls;
+        bool inputsMatch;
+        NTSTATUS trampolineStatus;
+    };
+
+    NativeAllocationRequest g_nativeRequest = {};
+    PVOID g_nativeTrampoline = nullptr;
+
+    /**
+     * @brief Records the test request and forwards allocations through the trampoline.
+     */
+    NTSTATUS NTAPI observeNativeAllocation(
+        HANDLE process,
+        _Inout_ PVOID* baseAddress,
+        ULONG_PTR zeroBits,
+        _Inout_ PSIZE_T regionSize,
+        ULONG allocationType,
+        ULONG protection
+    )
+    {
+        // Identify the test request by the addresses of its two output slots.
+        const bool isTestRequest =
+            baseAddress == &g_nativeRequest.baseAddress && regionSize == &g_nativeRequest.regionSize;
+        if (isTestRequest)
+        {
+            ++g_nativeRequest.hookCalls;
+            g_nativeRequest.inputsMatch = process == g_nativeRequest.process && *baseAddress == nullptr &&
+                                          zeroBits == NativeAllocationRequest::kZeroBits &&
+                                          *regionSize == NativeAllocationRequest::kRequestedSize &&
+                                          allocationType == NativeAllocationRequest::kAllocationType &&
+                                          protection == PAGE_READWRITE;
+        }
+
+        // Forward every request, including incidental allocations.
+        const auto original = reinterpret_cast<NativeAllocate>(g_nativeTrampoline);
+        const NTSTATUS status = original(process, baseAddress, zeroBits, regionSize, allocationType, protection);
+        if (isTestRequest)
+            g_nativeRequest.trampolineStatus = status;
+
+        return status;
+    }
+} // namespace
+
+/**
+ * @brief Verifies native allocation through the trampoline and after unhooking.
+ */
+static int caseNtAllocateVirtualMemory(void)
+{
+    using NativeFree = NTSTATUS(NTAPI*)(HANDLE, PVOID*, PSIZE_T, ULONG);
+
+    constexpr NTSTATUS kNativeSuccess = 0;
+    constexpr uint32_t kExpectedHookCalls = 1;
+
+    const HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    if (!module)
+        return Fail("ntdll.dll is unavailable");
+
+    const FARPROC allocateAddress = GetProcAddress(module, "NtAllocateVirtualMemory");
+    if (!allocateAddress)
+        return Fail("NtAllocateVirtualMemory is unavailable");
+
+    const FARPROC freeAddress = GetProcAddress(module, "NtFreeVirtualMemory");
+    if (!freeAddress)
+        return Fail("NtFreeVirtualMemory is unavailable");
+
+    // Keep the exported entry for both calls. Mhook updates the separate trampoline slot.
+    const auto allocate = reinterpret_cast<NativeAllocate>(reinterpret_cast<void (*)(void)>(allocateAddress));
+    const auto release = reinterpret_cast<NativeFree>(reinterpret_cast<void (*)(void)>(freeAddress));
+    const HANDLE process = GetCurrentProcess();
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+
+    g_nativeRequest = {};
+    g_nativeRequest.process = process;
+    g_nativeRequest.regionSize = NativeAllocationRequest::kRequestedSize;
+    PVOID* baseSlot = &g_nativeRequest.baseAddress;
+    PSIZE_T sizeSlot = &g_nativeRequest.regionSize;
+
+    g_nativeTrampoline = reinterpret_cast<PVOID>(allocate);
+    if (!Mhook_SetHook(&g_nativeTrampoline, reinterpret_cast<PVOID>(&observeNativeAllocation)))
+        return Fail("hooking NtAllocateVirtualMemory failed");
+
+    // Save the first failure so the test can release the allocation and remove the hook.
+    const NTSTATUS hookedStatus = allocate(
+        process,
+        baseSlot,
+        NativeAllocationRequest::kZeroBits,
+        sizeSlot,
+        NativeAllocationRequest::kAllocationType,
+        PAGE_READWRITE
+    );
+    const bool allocated = hookedStatus == kNativeSuccess && *baseSlot != nullptr;
+    const char* failure = nullptr;
+    if (g_nativeRequest.hookCalls != kExpectedHookCalls)
+        failure = "the replacement did not receive exactly one test request";
+    else if (!g_nativeRequest.inputsMatch)
+        failure = "the replacement received unexpected allocation arguments";
+    else if (hookedStatus != g_nativeRequest.trampolineStatus)
+        failure = "the caller received a different status from the trampoline";
+    else if (!allocated)
+        failure = "native allocation through the trampoline failed";
+
+    if (allocated)
+    {
+        // Check the returned address, protection, and rounded size.
+        MEMORY_BASIC_INFORMATION memory = {};
+        const SIZE_T queried = VirtualQuery(*baseSlot, &memory, sizeof(memory));
+        const bool outputsMatch = queried == sizeof(memory) && memory.State == MEM_COMMIT &&
+                                  memory.Protect == PAGE_READWRITE && memory.AllocationBase == *baseSlot &&
+                                  *sizeSlot == systemInfo.dwPageSize;
+        if (!outputsMatch && !failure)
+            failure = "the hooked allocation did not return a committed read/write page";
+
+        // MEM_RELEASE takes the returned base and a zero region size.
+        PVOID baseToRelease = *baseSlot;
+        SIZE_T releaseSize = 0;
+        if (release(process, &baseToRelease, &releaseSize, MEM_RELEASE) != kNativeSuccess && !failure)
+            failure = "releasing the hooked allocation failed";
+    }
+
+    if (!Mhook_Unhook(&g_nativeTrampoline))
+        return Fail("unhooking NtAllocateVirtualMemory failed");
+    if (!Mhook_ReclaimRetired())
+        return Fail("reclaiming the native allocation trampoline failed");
+    if (failure)
+        return Fail(failure);
+
+    // Call the same entry after unhooking and check that it bypasses the replacement.
+    g_nativeRequest = {};
+    g_nativeRequest.process = process;
+    g_nativeRequest.regionSize = NativeAllocationRequest::kRequestedSize;
+    const NTSTATUS restoredStatus = allocate(
+        process,
+        baseSlot,
+        NativeAllocationRequest::kZeroBits,
+        sizeSlot,
+        NativeAllocationRequest::kAllocationType,
+        PAGE_READWRITE
+    );
+    if (restoredStatus != kNativeSuccess || !*baseSlot)
+        return Fail("native allocation after unhooking failed");
+
+    PVOID baseToRelease = *baseSlot;
+    SIZE_T releaseSize = 0;
+    if (release(process, &baseToRelease, &releaseSize, MEM_RELEASE) != kNativeSuccess)
+        return Fail("releasing the allocation after unhooking failed");
+    if (g_nativeRequest.hookCalls != 0)
+        return Fail("the replacement still received the test request after unhooking");
+
     return 0;
 }
 
@@ -3185,6 +3351,7 @@ static const TestCase kCases[] = {
     {"batch_unhook_conflict", caseBatchUnhookConflict},
     {"batch_unhook_commit_failure", caseBatchUnhookCommitFailure},
     {"trampoline", CaseTrampoline},
+    {"nt_allocate_virtual_memory", caseNtAllocateVirtualMemory},
     {"restore", CaseRestore},
     {"conflict", CaseConflict},
     {"passthrough", CasePassthrough},

@@ -156,6 +156,7 @@ set(hookCases
     batch_unhook_conflict
     batch_unhook_commit_failure
     trampoline
+    nt_allocate_virtual_memory
     restore
     conflict
     passthrough
