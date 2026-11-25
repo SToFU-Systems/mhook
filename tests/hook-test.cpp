@@ -194,6 +194,118 @@ static int CaseTrampoline(void)
     return 0;
 }
 
+#ifdef _M_X64
+constexpr size_t kRipRelativeDataOffset = 16;
+
+struct RipRelativeFixture
+{
+    const char* name;
+    size_t loadOffset;
+    size_t resumeOffset;
+    BYTE code[kRipRelativeDataOffset + sizeof(uint64_t)];
+};
+
+/**
+ * @brief Reads the destination of a direct or RIP-relative indirect x64 jump.
+ * @return The destination address, or zero when the jump cannot be read.
+ */
+static uintptr_t readX64JumpDestination(const BYTE* jump)
+{
+    constexpr BYTE kNearJumpOpcode = 0xE9;
+    const bool isDirect = jump[0] == kNearJumpOpcode;
+    constexpr BYTE kIndirectJump[] = {0xFF, 0x25};
+    if (!isDirect && memcmp(jump, kIndirectJump, sizeof(kIndirectJump)) != 0)
+        return 0;
+
+    // Both forms use a signed displacement measured from the end of the jump instruction.
+    const size_t opcodeSize = isDirect ? sizeof(kNearJumpOpcode) : sizeof(kIndirectJump);
+    int32_t displacement = 0;
+    memcpy(&displacement, jump + opcodeSize, sizeof(displacement));
+    const uintptr_t nextAddress = reinterpret_cast<uintptr_t>(jump + opcodeSize + sizeof(displacement));
+    const uintptr_t relativeAddress = nextAddress + static_cast<uintptr_t>(displacement);
+    if (isDirect)
+        return relativeAddress;
+
+    // The indirect form points to a slot that holds the destination address.
+    const void* slot = reinterpret_cast<const void*>(relativeAddress);
+    uintptr_t destination = 0;
+    SIZE_T bytesRead = 0;
+    const BOOL readOk = ReadProcessMemory(GetCurrentProcess(), slot, &destination, sizeof(destination), &bytesRead);
+    if (!readOk || bytesRead != sizeof(destination))
+        return 0;
+
+    return destination;
+}
+
+/**
+ * @brief Verifies the relocated memory reference and the jump back without executing the trampoline.
+ */
+static int expectRipRelativeRelocation(const RipRelativeFixture& fixture)
+{
+    PBYTE target = AllocCodeBuffer(fixture.code, sizeof(fixture.code));
+    if (!target)
+        return Fail("allocating the RIP-relative target failed");
+
+    PVOID trampoline = target;
+    if (!Mhook_SetHook(&trampoline, reinterpret_cast<PVOID>(&HookCounting)))
+    {
+        if (!VirtualFree(target, 0, MEM_RELEASE))
+            return Fail("releasing the target after the failed install failed");
+
+        return Fail("Mhook_SetHook rejected the RIP-relative prologue");
+    }
+
+    // Read the displaced instruction's new memory reference.
+    const BYTE* emitted = static_cast<const BYTE*>(trampoline);
+    const BYTE* relocatedLoad = emitted + fixture.loadOffset;
+    constexpr size_t kDisplacementOffset = 3;
+    int32_t dataDisplacement = 0;
+    memcpy(&dataDisplacement, relocatedLoad + kDisplacementOffset, sizeof(dataDisplacement));
+    constexpr size_t kLoadSize = 7;
+    const uintptr_t addressAfterLoad = reinterpret_cast<uintptr_t>(relocatedLoad + kLoadSize);
+    const uintptr_t dataAddress = addressAfterLoad + static_cast<uintptr_t>(dataDisplacement);
+
+    // Use the fixture's original layout to check the relocated instructions and both destinations.
+    const char* failure = nullptr;
+    if (memcmp(emitted, fixture.code, fixture.loadOffset + kDisplacementOffset) != 0)
+        failure = "the trampoline changed the instructions before the load displacement";
+    else if (dataAddress != reinterpret_cast<uintptr_t>(target + kRipRelativeDataOffset))
+        failure = "the relocated instruction points at the wrong data";
+    else if (readX64JumpDestination(emitted + fixture.resumeOffset) !=
+             reinterpret_cast<uintptr_t>(target + fixture.resumeOffset))
+        failure = "the trampoline does not resume at the first untouched instruction";
+
+    // Remove the hook before releasing the code and its data.
+    if (!Mhook_Unhook(&trampoline))
+        return Fail("Mhook_Unhook failed after inspecting the trampoline");
+    if (!Mhook_ReclaimRetired() && !failure)
+        failure = "reclaiming the retired trampoline failed";
+    if (!VirtualFree(target, 0, MEM_RELEASE) && !failure)
+        failure = "releasing the RIP-relative target failed";
+
+    return failure ? Fail(failure) : 0;
+}
+
+/**
+ * @brief Covers a RIP-relative load at the entry and after a whole instruction.
+ */
+static int caseRipRelativeRelocation(void)
+{
+    constexpr RipRelativeFixture kFixtures[] = {
+        // mov rax, [rip + 9]; ret.
+        {"load at entry", 0, 7, {0x48, 0x8B, 0x05, 0x09, 0x00, 0x00, 0x00, 0xC3}},
+        // xor eax, eax; mov rax, [rip + 7]; ret.
+        {"load after xor", 2, 9, {0x33, 0xC0, 0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00, 0xC3}},
+    };
+
+    for (const RipRelativeFixture& fixture : kFixtures)
+        if (expectRipRelativeRelocation(fixture) != 0)
+            return Fail(fixture.name);
+
+    return 0;
+}
+#endif // _M_X64
+
 static int CaseRestore(void)
 {
     PBYTE target = AllocCodeBuffer(kMovEaxRet, sizeof(kMovEaxRet));
@@ -3035,6 +3147,7 @@ static const TestCase kCases[] = {
     {"resume_failure", caseResumeFailure},
     {"reuse", CaseReuse},
 #ifdef _M_X64
+    {"rip_relative_relocation", caseRipRelativeRelocation},
     {"pool", caseTrampolinePoolBookkeeping},
     {"block_protection_refused", caseBlockProtectionRefused},
 #endif // _M_X64

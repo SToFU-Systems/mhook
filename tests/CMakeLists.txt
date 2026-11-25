@@ -188,6 +188,8 @@ foreach(case IN LISTS hookCases)
 endforeach()
 
 if(MHOOK_ARCHITECTURE STREQUAL "x64")
+    add_test(NAME mhook.hook.rip_relative_relocation COMMAND mhook-hook-test rip_relative_relocation)
+    set_tests_properties(mhook.hook.rip_relative_relocation PROPERTIES TIMEOUT 15)
     add_test(NAME mhook.hook.pool COMMAND mhook-hook-test pool)
     set_tests_properties(mhook.hook.pool PROPERTIES TIMEOUT 15)
     add_test(NAME mhook.hook.block_protection_refused COMMAND mhook-hook-test block_protection_refused)
