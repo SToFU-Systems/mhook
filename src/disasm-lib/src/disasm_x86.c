@@ -1206,6 +1206,7 @@ U8* X86_FindFunctionByPrologue(INSTRUCTION* Instruction, U8* StartAddress, U8* E
  */
 BOOL X86_GetInstruction(INSTRUCTION* Instruction, U8* Address, U32 Flags)
 {
+    const U32 kMaxEstimatedDataStride = 16;
     BOOL SpecialExtension = FALSE;
     U8 Opcode = 0, OpcodeExtension = 0, Group = 0, SSE_Prefix = 0, Suffix;
     U32 i = 0, Result = 0, tmpScale;
@@ -2952,21 +2953,19 @@ HasSpecialExtension:
                      Operand->Length,
                      X86Instruction->Displacement)
                 );
-                if (!X86Instruction->Scale)
-                {
-                    assert(Operand->Length <= 0xFF);
-                    if (Operand->Length)
-                        X86Instruction->Scale = (U8)Operand->Length;
-                    else
-                        X86Instruction->Scale = X86Instruction->OperandSize;
-                }
                 tmpScale = MAX(X86Instruction->Scale, Operand->Length);
+                if (!tmpScale)
+                    tmpScale = X86Instruction->OperandSize;
 
                 assert(X86Instruction->HasFullDisplacement);
+                if (tmpScale > kMaxEstimatedDataStride)
+                    continue;
+                if (!X86Instruction->Scale)
+                    X86Instruction->Scale = (U8)tmpScale;
+
                 if (Operand->Flags & OP_DST)
                 {
                     assert(!Instruction->DataDst.Count);
-                    assert(tmpScale <= 16);
                     Instruction->CodeBranch.AddressOffset = tmpScale & 0x1Fu;
                     for (i = 0; i < MAX_DATA_REFERENCE_COUNT; i++)
                         Instruction->DataDst.Addresses[i] = (U64)X86Instruction->Displacement + (i * tmpScale);
@@ -2977,7 +2976,6 @@ HasSpecialExtension:
                 if (Operand->Flags & OP_SRC)
                 {
                     assert(!Instruction->DataSrc.Count);
-                    assert(tmpScale <= 16);
                     Instruction->CodeBranch.AddressOffset = tmpScale & 0x1Fu;
                     for (i = 0; i < MAX_DATA_REFERENCE_COUNT; i++)
                         Instruction->DataSrc.Addresses[i] = (U64)X86Instruction->Displacement + (i * tmpScale);
