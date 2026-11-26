@@ -316,6 +316,65 @@ static int caseRandomDecoderBounds(void)
 }
 
 /**
+ * @brief Tests random prologue byte sequences.
+ * @return Zero when every analysis returns a documented status and valid length.
+ */
+static int caseRandomPrologueAnalysis(void)
+{
+    // End every sample at the guard page so reading beyond byteCount fails.
+    constexpr SIZE_T kMaximumPrologueSize = 32;
+    U8* guardedBytes = NULL;
+    VirtualAllocation allocation = allocateGuardedBuffer(kMaximumPrologueSize, &guardedBytes);
+    if (!allocation)
+        return 1;
+
+    // Generate reproducible sample lengths and byte sequences.
+    constexpr uint32_t kSeed = 25;
+    std::mt19937 random(kSeed);
+    std::uniform_int_distribution<SIZE_T> byteCountDistribution(1, kMaximumPrologueSize);
+
+    constexpr uint32_t kSampleCount = 10000;
+    for (uint32_t sample = 0; sample < kSampleCount; ++sample)
+    {
+        const SIZE_T byteCount = byteCountDistribution(random);
+        U8* bytes = guardedBytes + kMaximumPrologueSize - byteCount;
+        std::generate_n(bytes, byteCount, [&random] { return static_cast<U8>(random()); });
+
+        // Accept only outcomes defined by prologue analysis.
+        DWORD instructionLength = 0;
+        const MHOOK_STATUS status = MhookAnalyzePrologue(bytes, byteCount, &instructionLength);
+        if (status != MHOOK_STATUS_SUCCESS && status != MHOOK_STATUS_DECODE_FAILED &&
+            status != MHOOK_STATUS_INVALID_TARGET && status != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+        {
+            fprintf(
+                stderr,
+                "seed %u, sample %u returned undocumented status %d\n",
+                kSeed,
+                sample,
+                static_cast<int>(status)
+            );
+            return 1;
+        }
+
+        // Reject reports that consume bytes outside the supplied sample.
+        if (instructionLength > byteCount)
+        {
+            fprintf(
+                stderr,
+                "seed %u, sample %u consumed %lu of %llu supplied bytes\n",
+                kSeed,
+                sample,
+                static_cast<unsigned long>(instructionLength),
+                static_cast<unsigned long long>(byteCount)
+            );
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * @brief Verifies acceptance of exactly one five-byte patch span.
  * @return Zero when analysis succeeds and consumes the complete span.
  */
@@ -421,6 +480,28 @@ static int caseMaximumPrologueSpan(void)
             static_cast<int>(status),
             static_cast<unsigned long>(instructionLength)
         );
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Tests a prologue containing only instruction prefixes.
+ * @return Zero when analysis reports an invalid target.
+ */
+static int casePrefixOnlyPrologue(void)
+{
+    // 5 operand-size prefixes without an opcode.
+    constexpr U8 kOperandSizePrefix = 0x66;
+    std::array<U8, 5> bytes = {};
+    bytes.fill(kOperandSizePrefix);
+
+    DWORD instructionLength = 0;
+    const MHOOK_STATUS status = MhookAnalyzePrologue(bytes.data(), bytes.size(), &instructionLength);
+    if (status != MHOOK_STATUS_INVALID_TARGET)
+    {
+        fprintf(stderr, "prefix-only prologue returned status=%d\n", static_cast<int>(status));
         return 1;
     }
 
@@ -626,6 +707,8 @@ int main()
         return 1;
     if (caseRandomDecoderBounds() != 0)
         return 1;
+    if (caseRandomPrologueAnalysis() != 0)
+        return 1;
     if (caseExactPrologueSpan() != 0)
         return 1;
     if (caseShortPrologueSpan() != 0)
@@ -633,6 +716,8 @@ int main()
     if (caseOversizedPrologueInput() != 0)
         return 1;
     if (caseMaximumPrologueSpan() != 0)
+        return 1;
+    if (casePrefixOnlyPrologue() != 0)
         return 1;
     if (caseTruncatedOpcode() != 0)
         return 1;
