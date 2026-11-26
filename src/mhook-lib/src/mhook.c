@@ -1803,9 +1803,10 @@ static void FixupIPRelativeAddressing(PBYTE output, PBYTE executionAddress, PBYT
 
 /**
  * @brief Decodes a function prologue through complete instruction boundaries.
- * @param[in] pFunction Function entry point represented by the decoded bytes.
+ * @param[in] pFunction Function address represented by the snapshot.
  * @param[in] dwMinLen Minimum number of complete bytes required for the patch.
- * @param[out] snapshot Validated target bytes used by the decoder.
+ * @param[in] snapshot Validated bytes used by the decoder.
+ * @param[in] snapshotSize Number of valid bytes stored in snapshot.
  * @param[out] pdata Collected relocation limits and RIP-relative patch data.
  * @param[out] instructionLength Number of complete bytes decoded.
  * @return Status describing whether the prologue can be patched.
@@ -1813,7 +1814,8 @@ static void FixupIPRelativeAddressing(PBYTE output, PBYTE executionAddress, PBYT
 static MHOOK_STATUS DisassembleAndSkip(
     PVOID pFunction,
     DWORD dwMinLen,
-    OUT U8 snapshot[MHOOKS_MAX_CODE_BYTES],
+    IN U8 snapshot[MHOOKS_MAX_CODE_BYTES],
+    SIZE_T snapshotSize,
     OUT MHOOKS_PATCHDATA* pdata,
     OUT DWORD* instructionLength
 )
@@ -1828,12 +1830,8 @@ static MHOOK_STATUS DisassembleAndSkip(
     pdata->nLimitDown = 0;
     pdata->nLimitUp = 0;
     pdata->nRipCnt = 0;
-    memset(snapshot, 0, MHOOKS_MAX_CODE_BYTES);
 
-    // Decode only from bytes copied out of validated executable memory.
-    SIZE_T snapshotSize = readMemoryPrefix(pFunction, MHOOKS_MAX_CODE_BYTES, kReadableCodeProtectionMask, snapshot);
-
-    if (!snapshotSize)
+    if (!snapshotSize || snapshotSize > MHOOKS_MAX_CODE_BYTES)
         return MHOOK_STATUS_INVALID_TARGET;
 
     DWORD dwRet = 0;
@@ -1993,6 +1991,29 @@ static MHOOK_STATUS DisassembleAndSkip(
 }
 
 /**
+ * @brief Analyzes supplied prologue bytes without installing or executing them.
+ * @param[in] bytes Prologue bytes stored in readable data memory.
+ * @param[in] byteCount Number of supplied bytes.
+ * @param[out] instructionLength Number of complete bytes decoded.
+ * @return Status describing whether the bytes contain a supported patch span.
+ */
+MHOOK_STATUS MhookAnalyzePrologue(const U8* bytes, SIZE_T byteCount, OUT DWORD* instructionLength)
+{
+    assert(bytes);
+    assert(instructionLength);
+
+    if (!byteCount || byteCount > MHOOKS_MAX_CODE_BYTES)
+        return MHOOK_STATUS_INVALID_ARGUMENT;
+
+    // Copy into padded storage so decoder lookahead remains readable.
+    U8 snapshot[MHOOKS_MAX_CODE_BYTES] = {0};
+    memcpy(snapshot, bytes, byteCount);
+
+    MHOOKS_PATCHDATA patchData = {0};
+    return DisassembleAndSkip((PVOID)bytes, MHOOK_JMPSIZE, snapshot, byteCount, &patchData, instructionLength);
+}
+
+/**
  * @brief Reads the calling thread's own g_lastStatus slot, which each set/unhook call on that thread overwrites.
  * @return The thread-local status value, left unchanged by this call.
  */
@@ -2111,12 +2132,24 @@ static MHOOK_STATUS prepareHook(PVOID* systemFunctionSlot, PVOID hookFunction, O
     if (status != MHOOK_STATUS_SUCCESS)
         return status;
 
-    // Decode once and retain the exact validated bytes used by the decoder.
+    // Read the target bytes before analyzing the prologue.
     U8 snapshot[MHOOKS_MAX_CODE_BYTES] = {0};
+    const SIZE_T snapshotSize =
+        readMemoryPrefix(resolvedSystemFunction, MHOOKS_MAX_CODE_BYTES, kReadableCodeProtectionMask, snapshot);
+    if (!snapshotSize)
+        return MHOOK_STATUS_INVALID_TARGET;
+
     MHOOKS_PATCHDATA patchData = {0};
     DWORD instructionLength = 0;
 
-    status = DisassembleAndSkip(resolvedSystemFunction, MHOOK_JMPSIZE, snapshot, &patchData, &instructionLength);
+    status = DisassembleAndSkip(
+        resolvedSystemFunction,
+        MHOOK_JMPSIZE,
+        snapshot,
+        snapshotSize,
+        &patchData,
+        &instructionLength
+    );
     if (status != MHOOK_STATUS_SUCCESS)
         return status;
 
