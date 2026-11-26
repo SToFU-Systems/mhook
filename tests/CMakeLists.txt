@@ -7,6 +7,23 @@ mhook_configure_private_target(mhook-decoder-test)
 add_test(NAME mhook.decoder COMMAND mhook-decoder-test)
 set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
 
+if(MHOOK_ARCHITECTURE STREQUAL "x64")
+    add_executable(mhook-relocation-test relocation-engine.c relocation-test.cpp relocation-test.h)
+    target_link_libraries(mhook-relocation-test PRIVATE mhook::headers mhook_disasm)
+    target_include_directories(mhook-relocation-test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/src/mhook-lib/include/mhook-lib"
+    )
+    target_compile_features(mhook-relocation-test PRIVATE c_std_99 cxx_std_17)
+    set_target_properties(mhook-relocation-test PROPERTIES C_EXTENSIONS ON CXX_EXTENSIONS OFF)
+    mhook_configure_private_target(mhook-relocation-test)
+    if(NOT MHOOK_ENABLE_SANITY_CHECKS)
+        target_compile_definitions(mhook-relocation-test PRIVATE NO_SANITY_CHECKS)
+    endif()
+    add_test(NAME mhook.relocation COMMAND mhook-relocation-test)
+    set_tests_properties(mhook.relocation PROPERTIES TIMEOUT 15)
+endif()
+
 add_executable(mhook-status-test status-test.cpp)
 target_link_libraries(mhook-status-test PRIVATE mhook::mhook)
 mhook_configure_private_target(mhook-status-test)
