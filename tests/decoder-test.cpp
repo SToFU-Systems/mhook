@@ -16,6 +16,8 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <algorithm>
+#include <array>
 #include "mhook-lib/mhook.h"
 #include "disasm-lib/disasm.h"
 
@@ -102,6 +104,37 @@ static bool CheckModRmRegisterOperand(void)
     return valid;
 }
 
+/**
+ * @brief Verifies that the decoder rejects an overlong instruction.
+ */
+static bool checkOverlongInstruction(ARCHITECTURE_TYPE mode)
+{
+    constexpr size_t kBufferSize = 32;
+    constexpr size_t kMaxInstructionLength = 15;
+    constexpr U8 kOperandSizePrefix = 0x66;
+    constexpr U8 kNop = 0x90;
+
+    std::array<U8, kBufferSize> bytes = {};
+    std::fill_n(bytes.begin(), kMaxInstructionLength, kOperandSizePrefix);
+    bytes[kMaxInstructionLength] = kNop;
+
+    DISASSEMBLER decoder = {};
+    if (!InitDisassembler(&decoder, mode))
+    {
+        fprintf(stderr, "could not initialize decoder mode %d\n", static_cast<int>(mode));
+        return false;
+    }
+
+    const U64 address = static_cast<U64>(reinterpret_cast<ULONG_PTR>(bytes.data()));
+    const bool rejected =
+        GetInstruction(&decoder, address, bytes.data(), DISASM_DECODE | DISASM_SUPPRESSERRORS) == nullptr;
+    if (!rejected)
+        fprintf(stderr, "decoder mode %d accepted an overlong instruction\n", static_cast<int>(mode));
+
+    CloseDisassembler(&decoder);
+    return rejected;
+}
+
 int main()
 {
     if (!set_hook || !remove_hook)
@@ -117,7 +150,7 @@ int main()
     for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     {
         if (!CheckInstruction(modes[i], move_immediate, 5, ITYPE_MOV) ||
-            !CheckInstruction(modes[i], return_instruction, 1, ITYPE_RET))
+            !CheckInstruction(modes[i], return_instruction, 1, ITYPE_RET) || !checkOverlongInstruction(modes[i]))
         {
             return 1;
         }
