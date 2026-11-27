@@ -48,6 +48,7 @@ SOURCE_EXTENSIONS = (".cpp", ".hpp", ".h", ".c", ".cc", ".cxx", ".inc")
 DOCS_DIR = os.path.join(REPO_ROOT, "docs")
 DOCS_OUTPUT_DIR = os.path.join(REPO_ROOT, "_docs")
 
+EXHAUSTIVE_TEST_VARIABLE = "MHOOK_TEST_EXHAUSTIVE"
 REPLAY_TIMEOUT_SECONDS = 15
 REPLAY_TESTS = {
     "mhook.decoder": ("decoder", "mhook-decoder-test.exe"),
@@ -64,9 +65,9 @@ def fail(message):
     sys.exit(1)
 
 
-def run(command, check=True):
+def run(command, check=True, environment=None):
     log("run: " + " ".join(command))
-    result = subprocess.run(command, cwd=REPO_ROOT)
+    result = subprocess.run(command, cwd=REPO_ROOT, env=environment)
     if result.returncode != 0 and check:
         fail(f"command failed ({result.returncode}): {' '.join(command)}")
     return result.returncode
@@ -203,13 +204,18 @@ def build(build_type):
     ])
 
 
-def run_tests(build_type):
+def run_tests(build_type, exhaustive=False):
     validate_build_type(build_type)
     _, _, test_preset = preset_names(build_type)
+    environment = os.environ.copy()
+    environment.pop(EXHAUSTIVE_TEST_VARIABLE, None)
+    if exhaustive:
+        environment[EXHAUSTIVE_TEST_VARIABLE] = "1"
+
     results_dir = os.path.join(REPO_ROOT, "_build", *_binary_dir_parts(build_type), "TestResults")
     os.makedirs(results_dir, exist_ok=True)
     junit_path = os.path.join(results_dir, "junit.xml")
-    returncode = run(["ctest", "--preset", test_preset, "--output-junit", junit_path], check=False)
+    returncode = run(["ctest", "--preset", test_preset, "--output-junit", junit_path], check=False, environment=environment)
     html_path = os.path.join(results_dir, "index.html")
     write_html_report(junit_path, html_path)
     log(f"JUnit report: {junit_path}")
@@ -492,6 +498,8 @@ def build_parser():
     parser.add_argument("--build", metavar="TYPE", help=f"configure, build and install\n{types_help}")
     parser.add_argument("--run-tests", metavar="TYPE",
         help="build then run tests with JUnit + HTML reports")
+    parser.add_argument("--exhaustive", action="store_true",
+        help="expand expensive test workloads; requires --run-tests")
     parser.add_argument("--package", metavar="TYPE",
         help="build pipeline then package with CPack")
     parser.add_argument("--format", action="store_true",
@@ -515,6 +523,8 @@ def main():
     if not any(vars(args).values()):
         parser.print_help()
         sys.exit(1)
+    if args.exhaustive and not args.run_tests:
+        parser.error("--exhaustive requires --run-tests")
 
     # Before configure_git_hooks: this runs on every commit, and reconfiguring
     # hooks each time would be pointless work.
@@ -534,7 +544,7 @@ def main():
         build(args.build)
     if args.run_tests:
         build(args.run_tests)
-        run_tests(args.run_tests)
+        run_tests(args.run_tests, args.exhaustive)
     if args.package:
         package(args.package)
     if args.docs:
