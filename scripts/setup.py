@@ -7,6 +7,7 @@ launched through setup.bat.
 """
 
 import argparse
+import glob
 import os
 import re
 import shutil
@@ -46,6 +47,12 @@ SOURCE_EXTENSIONS = (".cpp", ".hpp", ".h", ".c", ".cc", ".cxx", ".inc")
 
 DOCS_DIR = os.path.join(REPO_ROOT, "docs")
 DOCS_OUTPUT_DIR = os.path.join(REPO_ROOT, "_docs")
+
+REPLAY_TIMEOUT_SECONDS = 15
+REPLAY_TESTS = {
+    "mhook.decoder": ("decoder", "mhook-decoder-test.exe"),
+    "mhook.relocation": ("relocation", "mhook-relocation-test.exe"),
+}
 
 
 def log(message):
@@ -209,6 +216,92 @@ def run_tests(build_type):
     log(f"HTML report:  {html_path}")
     if returncode != 0:
         fail(f"tests failed ({returncode}); see {html_path}")
+
+
+def replay_executable(build_type, test_name):
+    """Returns the selected test executable and its replay directory."""
+    validate_build_type(build_type)
+    if test_name not in REPLAY_TESTS:
+        fail(f"unknown replay test '{test_name}'. Valid: {', '.join(REPLAY_TESTS)}")
+
+    replay_directory, executable_name = REPLAY_TESTS[test_name]
+    arch, config = split_build_type(build_type)
+    tests_dir = os.path.join(REPO_ROOT, "_build", *_binary_dir_parts(build_type), "tests")
+    if arch.startswith("mingw-"):
+        executable = os.path.join(tests_dir, executable_name)
+    else:
+        executable = os.path.join(tests_dir, _CMAKE_CONFIG[config], executable_name)
+
+    if not os.path.isfile(executable):
+        fail(f"replay test executable not found: {executable}")
+
+    return executable, os.path.join(tests_dir, "replay", replay_directory)
+
+
+def replay_snapshot(executable, snapshot, environment):
+    """Replays one snapshot and removes it only after success."""
+    command = [executable, "--replay", snapshot]
+    log("run: " + " ".join(command))
+    try:
+        result = subprocess.run(command, cwd=REPO_ROOT, env=environment, timeout=REPLAY_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print(f"[setup][error] replay timed out: {snapshot}", file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        print(f"[setup][error] replay failed ({result.returncode}): {snapshot}", file=sys.stderr)
+        return False
+
+    try:
+        os.remove(snapshot)
+    except OSError as error:
+        print(f"[setup][error] could not remove successful replay '{snapshot}': {error}", file=sys.stderr)
+        return False
+
+    log(f"removed successful replay: {snapshot}")
+    return True
+
+
+def replay(build_type, test_name, snapshot_argument):
+    """Replays one snapshot or every snapshot saved for one test."""
+    executable, replay_directory = replay_executable(build_type, test_name)
+    environment = os.environ.copy()
+
+    arch, _ = split_build_type(build_type)
+    if arch.startswith("mingw-"):
+        root_variable = f"MHOOK_{arch.replace('-', '_').upper()}_ROOT"
+        toolchain_root = environment.get(root_variable)
+        if not toolchain_root:
+            fail(f"{root_variable} is required to replay a {arch} test")
+
+        toolchain_bin = os.path.join(toolchain_root, "bin")
+        if not os.path.isdir(toolchain_bin):
+            fail(f"MinGW toolchain bin directory not found: {toolchain_bin}")
+
+        environment["PATH"] = toolchain_bin + os.pathsep + environment.get("PATH", "")
+
+    if snapshot_argument == "all":
+        pattern = os.path.join(replay_directory, "**", "*.case")
+        snapshots = sorted(path for path in glob.glob(pattern, recursive=True) if os.path.isfile(path))
+        if not snapshots:
+            fail(f"no replay inputs found under: {replay_directory}")
+    else:
+        snapshot = os.path.abspath(snapshot_argument)
+        if not os.path.isfile(snapshot):
+            fail(f"replay input not found: {snapshot}")
+        if os.path.splitext(snapshot)[1].lower() != ".case":
+            fail(f"replay input must use the .case extension: {snapshot}")
+        snapshots = [snapshot]
+
+    failures = []
+    for snapshot in snapshots:
+        if not replay_snapshot(executable, snapshot, environment):
+            failures.append(snapshot)
+
+    if failures:
+        fail(f"{len(failures)} of {len(snapshots)} replay inputs failed")
+
+    log(f"replayed {len(snapshots)} input(s) successfully")
 
 
 def write_html_report(junit_path, html_path):
@@ -409,6 +502,7 @@ def build_parser():
         help="remove _build/_install/_package/_docs")
     parser.add_argument("--docs", action="store_true",
         help="generate the API documentation into _docs/html")
+    parser.add_argument("--replay", nargs=3, metavar=("TYPE", "TEST", "SNAPSHOT"), help="replay one saved input or all saved inputs for a test")
     parser.add_argument("--check-commit-msg", metavar="FILE",
         help="validate a commit message file (used by the commit-msg hook)")
     return parser
@@ -445,6 +539,8 @@ def main():
         package(args.package)
     if args.docs:
         build_docs()
+    if args.replay:
+        replay(*args.replay)
 
 
 if __name__ == "__main__":

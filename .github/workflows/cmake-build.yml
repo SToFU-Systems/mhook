@@ -53,6 +53,7 @@ jobs:
                       _build/${{ matrix.architecture }}/CMakeCache.txt
                       _build/${{ matrix.architecture }}/CMakeFiles/CMakeConfigureLog.yaml
                       _build/${{ matrix.architecture }}/Testing/Temporary/
+                      _build/${{ matrix.architecture }}/tests/replay/**/*.case
 
     mingw:
         name: MinGW ${{ matrix.architecture }} ${{ matrix.configuration }}
@@ -97,6 +98,14 @@ jobs:
 
             - name: Test
               run: ctest --preset mingw-${{ matrix.architecture }}-${{ matrix.configuration }}-test
+
+            - name: Upload failed snapshot
+              if: failure()
+              uses: actions/upload-artifact@v7
+              with:
+                  name: replay-mingw-${{ matrix.architecture }}-${{ matrix.configuration }}
+                  path: _build/mingw-${{ matrix.architecture }}/${{ matrix.configuration }}/tests/replay/**/*.case
+                  if-no-files-found: ignore
 
     format:
         name: Format check

@@ -1,13 +1,14 @@
-add_executable(mhook-decoder-test decoder-test.cpp)
+add_executable(mhook-decoder-test decoder-test.cpp fuzz-replay.h)
 target_link_libraries(mhook-decoder-test PRIVATE mhook::mhook)
 target_include_directories(mhook-decoder-test PRIVATE
     "${PROJECT_SOURCE_DIR}/src/disasm-lib/include"
 )
+target_compile_features(mhook-decoder-test PRIVATE cxx_std_17)
 mhook_configure_private_target(mhook-decoder-test)
 add_test(NAME mhook.decoder COMMAND mhook-decoder-test)
 set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
 
-add_executable(mhook-relocation-test relocation-engine.c relocation-test.cpp relocation-test.h)
+add_executable(mhook-relocation-test fuzz-replay.h relocation-engine.c relocation-test.cpp relocation-test.h)
 target_link_libraries(mhook-relocation-test PRIVATE mhook::headers mhook_disasm)
 target_include_directories(mhook-relocation-test PRIVATE
     "${PROJECT_SOURCE_DIR}/src"

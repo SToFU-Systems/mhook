@@ -19,9 +19,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <random>
+#include "fuzz-replay.h"
 #include "mhook-lib/mhook.h"
 #include "disasm-lib/disasm.h"
 
@@ -222,6 +224,8 @@ static bool checkMaximumPrefixSequenceLength(ARCHITECTURE_TYPE mode)
 
 /**
  * @brief Verifies that the decoder rejects an overlong instruction.
+ * @param[in] mode Decoder architecture mode.
+ * @return True when the overlong instruction is rejected.
  */
 static bool checkOverlongInstruction(ARCHITECTURE_TYPE mode)
 {
@@ -252,10 +256,122 @@ static bool checkOverlongInstruction(ARCHITECTURE_TYPE mode)
 }
 
 /**
+ * @brief Converts a replay architecture to a decoder mode.
+ * @param[in] architecture Saved architecture.
+ * @return Matching decoder mode, or no value when unsupported.
+ */
+static std::optional<ARCHITECTURE_TYPE> toDecoderArchitecture(ReplayArchitecture architecture)
+{
+    switch (architecture)
+    {
+    case ReplayArchitecture::X86:
+        return ARCH_X86;
+    case ReplayArchitecture::X64:
+        return ARCH_X64;
+    case ReplayArchitecture::Count:
+        break;
+    }
+
+    return std::nullopt;
+}
+
+/**
+ * @brief Returns the architecture compiled into the Mhook library.
+ * @return Architecture used by prologue analysis.
+ */
+static ReplayArchitecture currentReplayArchitecture(void)
+{
+#if defined _M_IX86
+    return ReplayArchitecture::X86;
+#elif defined _M_X64
+    return ReplayArchitecture::X64;
+#else
+#error unsupported platform
+#endif
+}
+
+/**
+ * @brief Checks one decoder input for impossible instruction lengths.
+ * @param[in,out] decoder Initialized decoder state.
+ * @param[in] address Virtual address assigned to bytes.
+ * @param[in] bytes Readable instruction bytes.
+ * @param[in] byteCount Number of readable bytes.
+ * @return True when rejection or the decoded length is valid.
+ */
+static bool checkDecoderBounds(DISASSEMBLER* decoder, U64 address, U8* bytes, SIZE_T byteCount)
+{
+    constexpr U32 kDecodeFlags = DISASM_DECODE | DISASM_SUPPRESSERRORS;
+
+    const INSTRUCTION* instruction = GetInstruction(decoder, address, bytes, kDecodeFlags);
+    if (!instruction || instruction->ErrorOccurred)
+        return true;
+
+    const bool hasNonzeroLength = instruction->Length != 0;
+    const bool hasBoundedLength = instruction->Length <= byteCount;
+    if (!hasNonzeroLength || !hasBoundedLength)
+    {
+        fprintf(
+            stderr,
+            "decoder produced nonzero-length=%d, bounded-length=%d, length=%u\n",
+            hasNonzeroLength,
+            hasBoundedLength,
+            static_cast<unsigned>(instruction->Length)
+        );
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Checks one prologue input for documented status and length.
+ * @param[in] bytes Readable prologue bytes.
+ * @param[in] byteCount Number of readable bytes.
+ * @return True when the analysis result is valid.
+ */
+static bool checkPrologueAnalysis(const U8* bytes, SIZE_T byteCount)
+{
+    constexpr DWORD kMinimumPatchSpan = 5;
+
+    DWORD instructionLength = 0;
+    const MHOOK_STATUS status = MhookAnalyzePrologue(bytes, byteCount, &instructionLength);
+    if (status != MHOOK_STATUS_SUCCESS && status != MHOOK_STATUS_DECODE_FAILED &&
+        status != MHOOK_STATUS_INVALID_TARGET && status != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+    {
+        fprintf(stderr, "prologue analysis returned undocumented status %d\n", static_cast<int>(status));
+        return false;
+    }
+
+    if (status == MHOOK_STATUS_SUCCESS && instructionLength < kMinimumPatchSpan)
+    {
+        fprintf(
+            stderr,
+            "prologue analysis accepted a %lu-byte patch span\n",
+            static_cast<unsigned long>(instructionLength)
+        );
+        return false;
+    }
+
+    if (instructionLength > byteCount)
+    {
+        fprintf(
+            stderr,
+            "prologue analysis consumed %lu of %llu supplied bytes\n",
+            static_cast<unsigned long>(instructionLength),
+            static_cast<unsigned long long>(byteCount)
+        );
+        return false;
+    }
+
+    return true;
+}
+
+/**
  * @brief Verifies decoder read and instruction-length bounds on random input.
+ * @param[in] executablePath Test executable used for replay output.
  * @return Zero when both decoder modes stay within the 15-byte limit.
  */
-static int caseRandomDecoderBounds(void)
+static int caseRandomDecoderBounds(const char* executablePath)
 {
     // Expose exactly one maximum-length instruction window.
     constexpr SIZE_T kMaximumInstructionLength = 15;
@@ -266,44 +382,66 @@ static int caseRandomDecoderBounds(void)
 
     const U64 address = static_cast<U64>(reinterpret_cast<ULONG_PTR>(bytes));
 
+    // Keep the exact current sample available if the decoder crashes or hangs.
+    const std::filesystem::path replayPath = makeSnapshotPath("decoder", "mhook-decoder");
+    fprintf(stderr, "decoder replay: & \"%s\" --replay \"%s\"\n", executablePath, replayPath.string().c_str());
+    fflush(stderr);
+
     // Exercise identical random input sequences in both decoder modes.
-    constexpr ARCHITECTURE_TYPE kModes[] = {ARCH_X86, ARCH_X64};
-    for (const ARCHITECTURE_TYPE mode : kModes)
+    struct DecoderMode
+    {
+        ARCHITECTURE_TYPE decoder;
+        ReplayArchitecture replay;
+    };
+
+    constexpr DecoderMode kModes[] = {
+        {ARCH_X86, ReplayArchitecture::X86},
+        {ARCH_X64, ReplayArchitecture::X64},
+    };
+    for (const DecoderMode& mode : kModes)
     {
         constexpr uint32_t kSeed = 25;
         std::mt19937 random(kSeed);
 
         DISASSEMBLER decoder = {};
-        if (!InitDisassembler(&decoder, mode))
+        if (!InitDisassembler(&decoder, mode.decoder))
         {
-            fprintf(stderr, "random decoder setup failed for mode %d\n", static_cast<int>(mode));
+            fprintf(stderr, "random decoder setup failed for mode %d\n", static_cast<int>(mode.decoder));
             return 1;
         }
 
         constexpr uint32_t kSampleCount = 10000;
-        constexpr U32 kDecodeFlags = DISASM_DECODE | DISASM_SUPPRESSERRORS;
+        std::array<U8, 32> inputBytes = {};
+        FuzzSnapshot snapshot(replayPath, ReplayTarget::DecoderBounds, mode.replay);
         for (uint32_t sample = 0; sample < kSampleCount; ++sample)
         {
-            std::generate_n(bytes, kMaximumInstructionLength, [&random] { return static_cast<U8>(random()); });
+            std::generate_n(
+                inputBytes.begin(),
+                kMaximumInstructionLength,
+                [&random] { return static_cast<U8>(random()); }
+            );
+            std::copy_n(inputBytes.begin(), kMaximumInstructionLength, bytes);
 
-            const INSTRUCTION* instruction = GetInstruction(&decoder, address, bytes, kDecodeFlags);
-            if (!instruction || instruction->ErrorOccurred)
-                continue;
+            const bool saved = snapshot.saveSnapshot(inputBytes, kMaximumInstructionLength);
+            if (!saved)
+            {
+                CloseDisassembler(&decoder);
+                fprintf(stderr, "could not save decoder snapshot\n");
+                return 1;
+            }
 
-            const bool hasNonzeroLength = instruction->Length != 0;
-            const bool hasBoundedLength = instruction->Length <= kMaximumInstructionLength;
-            if (!hasNonzeroLength || !hasBoundedLength)
+            const bool valid = checkDecoderBounds(&decoder, address, bytes, kMaximumInstructionLength);
+            if (!valid)
             {
                 CloseDisassembler(&decoder);
                 fprintf(
                     stderr,
-                    "mode %d, seed %u, sample %u: nonzero-length=%d, bounded-length=%d, length=%u\n",
-                    static_cast<int>(mode),
+                    "mode %d, seed %u, sample %u; replay with & \"%s\" --replay \"%s\"\n",
+                    static_cast<int>(mode.decoder),
                     kSeed,
                     sample,
-                    hasNonzeroLength,
-                    hasBoundedLength,
-                    static_cast<unsigned>(instruction->Length)
+                    executablePath,
+                    replayPath.string().c_str()
                 );
                 return 1;
             }
@@ -312,14 +450,23 @@ static int caseRandomDecoderBounds(void)
         CloseDisassembler(&decoder);
     }
 
+    std::error_code removeError = {};
+    const bool removed = std::filesystem::remove(replayPath, removeError);
+    if (!removed || removeError)
+    {
+        fprintf(stderr, "could not remove decoder snapshot\n");
+        return 1;
+    }
+
     return 0;
 }
 
 /**
  * @brief Tests random prologue byte sequences.
+ * @param[in] executablePath Test executable used for replay output.
  * @return Zero when every analysis returns a documented status and valid length.
  */
-static int caseRandomPrologueAnalysis(void)
+static int caseRandomPrologueAnalysis(const char* executablePath)
 {
     // End every sample at the guard page so reading beyond byteCount fails.
     constexpr SIZE_T kMaximumPrologueSize = 32;
@@ -333,42 +480,52 @@ static int caseRandomPrologueAnalysis(void)
     std::mt19937 random(kSeed);
     std::uniform_int_distribution<SIZE_T> byteCountDistribution(1, kMaximumPrologueSize);
 
+    // Keep the exact current sample available if analysis crashes or hangs.
+    const std::filesystem::path replayPath = makeSnapshotPath("decoder", "mhook-prologue");
+    fprintf(stderr, "prologue replay: & \"%s\" --replay \"%s\"\n", executablePath, replayPath.string().c_str());
+    fflush(stderr);
+
     constexpr uint32_t kSampleCount = 10000;
-    for (uint32_t sample = 0; sample < kSampleCount; ++sample)
     {
-        const SIZE_T byteCount = byteCountDistribution(random);
-        U8* bytes = guardedBytes + kMaximumPrologueSize - byteCount;
-        std::generate_n(bytes, byteCount, [&random] { return static_cast<U8>(random()); });
-
-        // Accept only outcomes defined by prologue analysis.
-        DWORD instructionLength = 0;
-        const MHOOK_STATUS status = MhookAnalyzePrologue(bytes, byteCount, &instructionLength);
-        if (status != MHOOK_STATUS_SUCCESS && status != MHOOK_STATUS_DECODE_FAILED &&
-            status != MHOOK_STATUS_INVALID_TARGET && status != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+        std::array<U8, 32> inputBytes = {};
+        FuzzSnapshot snapshot(replayPath, ReplayTarget::PrologueAnalysis, currentReplayArchitecture());
+        for (uint32_t sample = 0; sample < kSampleCount; ++sample)
         {
-            fprintf(
-                stderr,
-                "seed %u, sample %u returned undocumented status %d\n",
-                kSeed,
-                sample,
-                static_cast<int>(status)
-            );
-            return 1;
-        }
+            const SIZE_T byteCount = byteCountDistribution(random);
+            U8* bytes = guardedBytes + kMaximumPrologueSize - byteCount;
+            inputBytes.fill(0);
+            std::generate_n(inputBytes.begin(), byteCount, [&random] { return static_cast<U8>(random()); });
+            std::copy_n(inputBytes.begin(), byteCount, bytes);
 
-        // Reject reports that consume bytes outside the supplied sample.
-        if (instructionLength > byteCount)
-        {
-            fprintf(
-                stderr,
-                "seed %u, sample %u consumed %lu of %llu supplied bytes\n",
-                kSeed,
-                sample,
-                static_cast<unsigned long>(instructionLength),
-                static_cast<unsigned long long>(byteCount)
-            );
-            return 1;
+            const bool saved = snapshot.saveSnapshot(inputBytes, byteCount);
+            if (!saved)
+            {
+                fprintf(stderr, "could not save prologue snapshot\n");
+                return 1;
+            }
+
+            const bool valid = checkPrologueAnalysis(bytes, byteCount);
+            if (!valid)
+            {
+                fprintf(
+                    stderr,
+                    "seed %u, sample %u; replay with & \"%s\" --replay \"%s\"\n",
+                    kSeed,
+                    sample,
+                    executablePath,
+                    replayPath.string().c_str()
+                );
+                return 1;
+            }
         }
+    }
+
+    std::error_code removeError = {};
+    const bool removed = std::filesystem::remove(replayPath, removeError);
+    if (!removed || removeError)
+    {
+        fprintf(stderr, "could not remove prologue snapshot\n");
+        return 1;
     }
 
     return 0;
@@ -682,8 +839,187 @@ static int caseConditionalJumpPrologue(void)
     return 0;
 }
 
-int main()
+/**
+ * @brief Verifies exact replay input serialization.
+ * @return Zero when the saved input loads unchanged.
+ */
+static int caseReplayInputRoundTrip(void)
 {
+    constexpr size_t kByteCount = 5;
+    std::array<uint8_t, 32> bytes = {};
+    std::fill_n(bytes.begin(), kByteCount, static_cast<uint8_t>(0x90)); // 5 NOP.
+
+    const std::filesystem::path path = makeSnapshotPath("decoder", "mhook-snapshot-round-trip");
+    if (path.parent_path().filename() != "decoder" || path.parent_path().parent_path().filename() != "replay")
+    {
+        fprintf(stderr, "snapshot path does not use the decoder replay directory\n");
+        return 1;
+    }
+
+    {
+        FuzzSnapshot snapshot(path, ReplayTarget::PrologueAnalysis, ReplayArchitecture::X64);
+        if (!snapshot.saveSnapshot(bytes, kByteCount))
+        {
+            fprintf(stderr, "could not save round-trip snapshot\n");
+            return 1;
+        }
+    }
+
+    const std::optional<ReplayInput> actual = loadSnapshot(path);
+
+    std::error_code removeError = {};
+    const bool removed = std::filesystem::remove(path, removeError);
+    if (!removed || removeError)
+    {
+        fprintf(stderr, "could not remove round-trip snapshot\n");
+        return 1;
+    }
+
+    if (!actual)
+    {
+        fprintf(stderr, "could not load round-trip snapshot\n");
+        return 1;
+    }
+    if (actual->target != ReplayTarget::PrologueAnalysis)
+    {
+        fprintf(stderr, "snapshot target changed during round-trip\n");
+        return 1;
+    }
+    if (actual->architecture != ReplayArchitecture::X64)
+    {
+        fprintf(stderr, "snapshot architecture changed during round-trip\n");
+        return 1;
+    }
+    if (actual->byteCount != kByteCount)
+    {
+        fprintf(stderr, "snapshot byte count changed during round-trip\n");
+        return 1;
+    }
+    if (actual->bytes != bytes)
+    {
+        fprintf(stderr, "snapshot bytes changed during round-trip\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Verifies an unknown replay architecture is not treated as x86.
+ * @return Zero when conversion rejects the unknown value.
+ */
+static int caseUnknownReplayArchitecture(void)
+{
+    constexpr ReplayArchitecture kUnknownArchitecture = static_cast<ReplayArchitecture>(0xFF);
+    const auto decoderMode = toDecoderArchitecture(kUnknownArchitecture);
+    if (decoderMode)
+    {
+        fprintf(stderr, "unknown replay architecture was treated as a decoder mode\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Replays one decoder-bounds input through the guarded decoder path.
+ * @param[in] input Saved decoder input.
+ * @return Zero when rejection or the decoded length is valid.
+ */
+static int replayDecoderBounds(const ReplayInput& input)
+{
+    const SIZE_T byteCount = input.byteCount;
+    U8* bytes = NULL;
+    VirtualAllocation allocation = allocateGuardedBuffer(byteCount, &bytes);
+    if (!allocation)
+        return 1;
+    std::copy_n(input.bytes.begin(), byteCount, bytes);
+
+    const std::optional<ARCHITECTURE_TYPE> mode = toDecoderArchitecture(input.architecture);
+    if (!mode)
+    {
+        fprintf(stderr, "replay decoder architecture is unsupported\n");
+        return 1;
+    }
+
+    DISASSEMBLER decoder = {};
+    if (!InitDisassembler(&decoder, mode.value()))
+    {
+        fprintf(stderr, "could not initialize replay decoder mode %d\n", static_cast<int>(mode.value()));
+        return 1;
+    }
+
+    const U64 address = static_cast<U64>(reinterpret_cast<ULONG_PTR>(bytes));
+    const bool valid = checkDecoderBounds(&decoder, address, bytes, byteCount);
+    CloseDisassembler(&decoder);
+    return valid ? 0 : 1;
+}
+
+/**
+ * @brief Replays one prologue-analysis input through guarded memory.
+ * @param[in] input Saved prologue input.
+ * @return Zero when analysis returns a documented result.
+ */
+static int replayPrologueAnalysis(const ReplayInput& input)
+{
+    if (input.architecture != currentReplayArchitecture())
+    {
+        fprintf(stderr, "prologue replay architecture does not match this build\n");
+        return 1;
+    }
+
+    const SIZE_T byteCount = input.byteCount;
+    U8* bytes = NULL;
+    VirtualAllocation allocation = allocateGuardedBuffer(byteCount, &bytes);
+    if (!allocation)
+        return 1;
+    std::copy_n(input.bytes.begin(), byteCount, bytes);
+
+    return checkPrologueAnalysis(bytes, byteCount) ? 0 : 1;
+}
+
+/**
+ * @brief Loads and dispatches one saved decoder or prologue input.
+ * @param[in] path Replay file path.
+ * @return Zero when the saved input satisfies its original invariant.
+ */
+static int replaySavedInput(const std::filesystem::path& path)
+{
+    const std::optional<ReplayInput> input = loadSnapshot(path);
+    if (!input)
+    {
+        fprintf(stderr, "could not load replay input %s\n", path.string().c_str());
+        return 1;
+    }
+
+    switch (input->target)
+    {
+    case ReplayTarget::DecoderBounds:
+        return replayDecoderBounds(input.value());
+    case ReplayTarget::PrologueAnalysis:
+        return replayPrologueAnalysis(input.value());
+    default:
+        fprintf(stderr, "replay input belongs to the relocation test\n");
+        return 1;
+    }
+}
+
+/**
+ * @brief Runs decoder tests or replays one saved fuzz input.
+ * @param[in] argumentCount Number of command-line arguments.
+ * @param[in] arguments Command-line argument values.
+ * @return Zero when every selected check passes.
+ */
+int main(int argumentCount, char* arguments[])
+{
+    if (argumentCount == 3 && std::strcmp(arguments[1], "--replay") == 0)
+        return replaySavedInput(arguments[2]);
+    if (argumentCount != 1)
+    {
+        fprintf(stderr, "usage: %s [--replay case-file]\n", arguments[0]);
+        return 1;
+    }
+
     if (!set_hook || !remove_hook)
     {
         fprintf(stderr, "Public hook API linkage failed\n");
@@ -705,9 +1041,9 @@ int main()
     }
     if (!CheckSnapshotVirtualAddress() || !CheckModRmRegisterOperand())
         return 1;
-    if (caseRandomDecoderBounds() != 0)
+    if (caseRandomDecoderBounds(arguments[0]) != 0)
         return 1;
-    if (caseRandomPrologueAnalysis() != 0)
+    if (caseRandomPrologueAnalysis(arguments[0]) != 0)
         return 1;
     if (caseExactPrologueSpan() != 0)
         return 1;
@@ -732,6 +1068,10 @@ int main()
     if (caseUnconditionalJumpPrologue() != 0)
         return 1;
     if (caseConditionalJumpPrologue() != 0)
+        return 1;
+    if (caseReplayInputRoundTrip() != 0)
+        return 1;
+    if (caseUnknownReplayArchitecture() != 0)
         return 1;
     puts("Archive linkage and x86/x64 decoder checks passed.");
     return 0;

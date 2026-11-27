@@ -219,6 +219,7 @@ the same reason.
 | `setup.bat --format` | Format the sources with clang-format |
 | `setup.bat --format-check` | Check formatting without modifying files |
 | `setup.bat --clean` | Remove `_build`, `_install`, `_package` and `_docs` |
+| `setup.bat --replay TYPE TEST [SNAPSHOT/all]` | Replay one or all saved tests |
 
 `TYPE` is `<arch>-<config>`:
 
