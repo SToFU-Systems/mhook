@@ -1,11 +1,27 @@
-add_executable(mhook-decoder-test decoder-test.cpp)
+add_executable(mhook-decoder-test decoder-test.cpp fuzz-replay.h)
 target_link_libraries(mhook-decoder-test PRIVATE mhook::mhook)
 target_include_directories(mhook-decoder-test PRIVATE
     "${PROJECT_SOURCE_DIR}/src/disasm-lib/include"
 )
+target_compile_features(mhook-decoder-test PRIVATE cxx_std_17)
 mhook_configure_private_target(mhook-decoder-test)
 add_test(NAME mhook.decoder COMMAND mhook-decoder-test)
 set_tests_properties(mhook.decoder PROPERTIES TIMEOUT 15)
+
+add_executable(mhook-relocation-test fuzz-replay.h relocation-engine.c relocation-test.cpp relocation-test.h)
+target_link_libraries(mhook-relocation-test PRIVATE mhook::headers mhook_disasm)
+target_include_directories(mhook-relocation-test PRIVATE
+    "${PROJECT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/src/mhook-lib/include/mhook-lib"
+)
+target_compile_features(mhook-relocation-test PRIVATE c_std_99 cxx_std_17)
+set_target_properties(mhook-relocation-test PROPERTIES C_EXTENSIONS ON CXX_EXTENSIONS OFF)
+mhook_configure_private_target(mhook-relocation-test)
+if(NOT MHOOK_ENABLE_SANITY_CHECKS)
+    target_compile_definitions(mhook-relocation-test PRIVATE NO_SANITY_CHECKS)
+endif()
+add_test(NAME mhook.relocation COMMAND mhook-relocation-test)
+set_tests_properties(mhook.relocation PROPERTIES TIMEOUT 15)
 
 add_executable(mhook-status-test status-test.cpp)
 target_link_libraries(mhook-status-test PRIVATE mhook::mhook)
@@ -18,6 +34,7 @@ set(statusCases
     invalid_set_hook_access
     invalid_set_thunk_boundary
     invalid_set_decode_boundary
+    unsupported_prologue_control_transfer
     invalid_set_thunk_indirect
     invalid_set_thunk_cycle
     invalid_set_thunk_depth
@@ -155,6 +172,7 @@ set(hookCases
     batch_unhook_conflict
     batch_unhook_commit_failure
     trampoline
+    nt_allocate_virtual_memory
     restore
     conflict
     passthrough

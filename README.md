@@ -213,12 +213,13 @@ the same reason.
 | Command | Effect |
 | --- | --- |
 | `setup.bat --build TYPE` | Configure, build and install |
-| `setup.bat --run-tests TYPE` | Build, then run the tests with JUnit and HTML reports |
+| `setup.bat --run-tests TYPE [--exhaustive]` | Build, then run the tests with JUnit and HTML reports |
 | `setup.bat --package TYPE` | The full pipeline, then package with CPack |
 | `setup.bat --docs` | Generate the API documentation into `_docs/html/` |
 | `setup.bat --format` | Format the sources with clang-format |
 | `setup.bat --format-check` | Check formatting without modifying files |
 | `setup.bat --clean` | Remove `_build`, `_install`, `_package` and `_docs` |
+| `setup.bat --replay TYPE TEST SNAPSHOT/all` | Replay one or all saved tests |
 
 `TYPE` is `<arch>-<config>`:
 
@@ -231,8 +232,13 @@ For example:
 ```powershell
 setup.bat --build x64-debug
 setup.bat --run-tests x86-release
+setup.bat --run-tests x64-debug --exhaustive
 setup.bat --package x64-relwithdebinfo
 ```
+
+`--run-tests` uses CI-sized workloads by default. Add `--exhaustive` for the
+longer variants of the concurrent hook, reuse, export sweep and reclaim churn
+tests.
 
 ### CMake presets directly
 
