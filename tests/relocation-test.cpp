@@ -19,6 +19,40 @@ enum class RelocationCheckResult
 };
 
 /**
+ * @brief Stores the staged trampoline bytes returned by the relocation engine.
+ */
+using RelocationOutput = std::array<uint8_t, 32>;
+
+/**
+ * @brief Checks that staged code resumes at the first source byte not relocated.
+ * @param[in] output Staged trampoline bytes.
+ * @param[in] instructionLength Number of source bytes relocated.
+ * @param[in] sourceAddress Simulated source address.
+ * @param[in] trampolineAddress Simulated trampoline address.
+ * @return True when the staged relative jump reaches the expected source address.
+ */
+static bool hasExpectedResumeJump(
+    const RelocationOutput& output,
+    DWORD instructionLength,
+    ULONG_PTR sourceAddress,
+    ULONG_PTR trampolineAddress
+)
+{
+    constexpr uint8_t kJumpOpcode = 0xE9;
+    constexpr size_t kJumpSize = 5;
+    if (instructionLength + kJumpSize > output.size() || output[instructionLength] != kJumpOpcode)
+        return false;
+
+    // Resolve the staged displacement from its simulated execution address.
+    int32_t displacement = 0;
+    std::memcpy(&displacement, output.data() + instructionLength + 1, sizeof(displacement));
+    const int64_t resumeAddress =
+        static_cast<int64_t>(trampolineAddress + instructionLength + kJumpSize) + displacement;
+    const int64_t expectedAddress = static_cast<int64_t>(sourceAddress + instructionLength);
+    return resumeAddress == expectedAddress;
+}
+
+/**
  * @brief Returns the architecture compiled into the relocation test.
  * @return Current replay architecture.
  */
@@ -33,21 +67,20 @@ static ReplayArchitecture currentReplayArchitecture(void)
 #endif
 }
 
-#ifdef _M_X64
+#ifdef _M_IX86
 /**
- * @brief Tests relocation of a RIP-relative load.
- * @return Zero when the staged instruction retains its original target.
+ * @brief Tests that x86 relocation copies complete instructions before resuming.
+ * @return Zero when both complete instructions and the resume jump are staged correctly.
  */
-static int caseRipRelativeLoadRelocation(void)
+static int caseX86WholeInstructionRelocation(void)
 {
-    // MOV RAX, [RIP + 9] references address 0x10000010.
     constexpr ULONG_PTR kSourceAddress = 0x10000000;
-    constexpr ULONG_PTR kExpectedTargetAddress = 0x10000010;
-    constexpr std::array<uint8_t, 7> bytes = {0x48, 0x8B, 0x05, 0x09, 0x00, 0x00, 0x00};
-
-    // Build the hook image using simulated addresses and ordinary data storage.
     constexpr ULONG_PTR kTrampolineAddress = 0x10001000;
-    std::array<uint8_t, 32> output = {};
+    constexpr DWORD kExpectedInstructionLength = 6;
+
+    // PUSHAD; ADD EAX, 1; POPAD; RET.
+    constexpr std::array<uint8_t, 8> bytes = {0x60, 0x05, 0x01, 0x00, 0x00, 0x00, 0x61, 0xC3};
+    RelocationOutput output = {};
     DWORD instructionLength = 0;
     const MHOOK_STATUS status = stageHookCodeForTest(
         bytes.data(),
@@ -60,27 +93,134 @@ static int caseRipRelativeLoadRelocation(void)
     );
     if (status != MHOOK_STATUS_SUCCESS)
     {
-        fprintf(stderr, "RIP-relative load relocation returned status=%d\n", static_cast<int>(status));
+        fprintf(stderr, "x86 whole-instruction relocation returned status=%d\n", static_cast<int>(status));
         return 1;
     }
 
-    // Resolve the target represented by the relocated displacement.
-    constexpr size_t kInstructionLength = 7;
-    constexpr size_t kDisplacementOffset = 3;
-    int32_t relocatedDisplacement = 0;
-    std::memcpy(&relocatedDisplacement, output.data() + kDisplacementOffset, sizeof(relocatedDisplacement));
-
-    const int64_t relocatedTargetAddress =
-        static_cast<int64_t>(kTrampolineAddress + kInstructionLength) + relocatedDisplacement;
-    if (relocatedTargetAddress != kExpectedTargetAddress)
+    // The five-byte patch span must include the complete five-byte ADD instruction.
+    if (instructionLength != kExpectedInstructionLength)
     {
         fprintf(
             stderr,
-            "RIP-relative load relocation produced target=%llx\n",
-            static_cast<unsigned long long>(relocatedTargetAddress)
+            "x86 relocation copied %lu bytes instead of %lu\n",
+            static_cast<unsigned long>(instructionLength),
+            static_cast<unsigned long>(kExpectedInstructionLength)
         );
         return 1;
     }
+    if (!std::equal(bytes.begin(), bytes.begin() + instructionLength, output.begin()))
+    {
+        fprintf(stderr, "x86 relocation changed the copied instructions\n");
+        return 1;
+    }
+    if (!hasExpectedResumeJump(output, instructionLength, kSourceAddress, kTrampolineAddress))
+    {
+        fprintf(stderr, "x86 relocation produced an invalid resume jump\n");
+        return 1;
+    }
+
+    return 0;
+}
+#endif
+
+#ifdef _M_X64
+constexpr size_t kRipRelativeCaseSize = 9;
+
+/**
+ * @brief Describes one supported RIP-relative instruction sequence.
+ */
+struct RipRelativeCase
+{
+    const char* name;
+    size_t byteCount;
+    size_t instructionOffset;
+    DWORD instructionLength;
+    std::array<uint8_t, kRipRelativeCaseSize> bytes;
+};
+
+/**
+ * @brief Checks one structured RIP-relative relocation case.
+ * @param[in] test Structured instruction bytes and expected copied span.
+ * @return Zero when relocation preserves the instruction target and resume address.
+ */
+static int checkRipRelativeCase(const RipRelativeCase& test)
+{
+    constexpr ULONG_PTR kSourceAddress = 0x10000000;
+    constexpr ULONG_PTR kTrampolineAddress = 0x10001000;
+    constexpr size_t kInstructionSize = 7;
+    constexpr size_t kDisplacementOffset = 3;
+    constexpr size_t kReferencedDataOffset = 16;
+
+    RelocationOutput output = {};
+    DWORD instructionLength = 0;
+    const MHOOK_STATUS status = stageHookCodeForTest(
+        test.bytes.data(),
+        test.byteCount,
+        kSourceAddress,
+        kTrampolineAddress,
+        output.data(),
+        output.size(),
+        &instructionLength
+    );
+    if (status != MHOOK_STATUS_SUCCESS)
+    {
+        fprintf(stderr, "%s returned status=%d\n", test.name, static_cast<int>(status));
+        return 1;
+    }
+
+    // Check the copied span and every opcode byte before the adjusted displacement.
+    const size_t displacementOffset = test.instructionOffset + kDisplacementOffset;
+    if (instructionLength != test.instructionLength)
+    {
+        fprintf(stderr, "%s copied an unexpected instruction span\n", test.name);
+        return 1;
+    }
+    if (!std::equal(test.bytes.begin(), test.bytes.begin() + displacementOffset, output.begin()))
+    {
+        fprintf(stderr, "%s changed bytes outside the RIP-relative displacement\n", test.name);
+        return 1;
+    }
+
+    // Resolve the adjusted displacement and compare it with the fixture's data address.
+    int32_t relocatedDisplacement = 0;
+    std::memcpy(&relocatedDisplacement, output.data() + displacementOffset, sizeof(relocatedDisplacement));
+    const int64_t relocatedTarget =
+        static_cast<int64_t>(kTrampolineAddress + test.instructionOffset + kInstructionSize) + relocatedDisplacement;
+    const int64_t expectedTarget = static_cast<int64_t>(kSourceAddress + kReferencedDataOffset);
+    if (relocatedTarget != expectedTarget)
+    {
+        fprintf(stderr, "%s changed the RIP-relative target\n", test.name);
+        return 1;
+    }
+    if (!hasExpectedResumeJump(output, instructionLength, kSourceAddress, kTrampolineAddress))
+    {
+        fprintf(stderr, "%s produced an invalid resume jump\n", test.name);
+        return 1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Tests structured RIP-relative loads, stores, and address calculations.
+ * @return Zero when every supported instruction shape relocates correctly.
+ */
+static int caseRipRelativeInstructionRelocation(void)
+{
+    constexpr RipRelativeCase kCases[] = {
+        // MOV RAX, [RIP + 9].
+        {"load at entry", 7, 0, 7, {0x48, 0x8B, 0x05, 0x09, 0x00, 0x00, 0x00}},
+        // XOR EAX, EAX; MOV RAX, [RIP + 7].
+        {"load after xor", 9, 2, 9, {0x33, 0xC0, 0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00}},
+        // MOV [RIP + 9], RAX.
+        {"store at entry", 7, 0, 7, {0x48, 0x89, 0x05, 0x09, 0x00, 0x00, 0x00}},
+        // LEA RAX, [RIP + 9].
+        {"lea at entry", 7, 0, 7, {0x48, 0x8D, 0x05, 0x09, 0x00, 0x00, 0x00}},
+    };
+
+    for (const RipRelativeCase& test : kCases)
+        if (checkRipRelativeCase(test) != 0)
+            return 1;
 
     return 0;
 }
@@ -95,7 +235,7 @@ static bool checkRipRelativeRelocation(const ReplayInput& input)
     constexpr ULONG_PTR kSourceAddress = 0x10000000;
     constexpr ULONG_PTR kTrampolineAddress = 0x10001000;
 
-    std::array<uint8_t, 32> output = {};
+    RelocationOutput output = {};
     DWORD instructionLength = 0;
     const MHOOK_STATUS status = stageHookCodeForTest(
         input.bytes.data(),
@@ -201,6 +341,53 @@ static int caseRandomRipRelativeDisplacement(const char* executablePath)
 #endif
 
 /**
+ * @brief Tests rejection of control transfers inside the relocated prologue span.
+ * @return Zero when every unsupported instruction shape returns its explicit status.
+ */
+static int caseUnsupportedControlTransferRelocation(void)
+{
+    constexpr ULONG_PTR kSourceAddress = 0x10000000;
+    constexpr ULONG_PTR kTrampolineAddress = 0x10001000;
+
+    struct PrologueCase
+    {
+        const char* name;
+        std::array<uint8_t, 8> bytes;
+    };
+
+    constexpr PrologueCase kCases[] = {
+        // NOP; CALL +1; RET; RET.
+        {"relative call", {0x90, 0xE8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0xC3}},
+        // NOP; JMP +1; NOP; RET.
+        {"unconditional jump", {0x90, 0xE9, 0x01, 0x00, 0x00, 0x00, 0x90, 0xC3}},
+        // NOP; JNE +4; 4 NOPs; RET.
+        {"conditional jump", {0x90, 0x75, 0x04, 0x90, 0x90, 0x90, 0x90, 0xC3}},
+    };
+
+    for (const PrologueCase& test : kCases)
+    {
+        RelocationOutput output = {};
+        DWORD instructionLength = 0;
+        const MHOOK_STATUS status = stageHookCodeForTest(
+            test.bytes.data(),
+            test.bytes.size(),
+            kSourceAddress,
+            kTrampolineAddress,
+            output.data(),
+            output.size(),
+            &instructionLength
+        );
+        if (status != MHOOK_STATUS_UNSUPPORTED_PROLOGUE)
+        {
+            fprintf(stderr, "%s returned status=%d\n", test.name, static_cast<int>(status));
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * @brief Checks one input through prologue analysis and relocation staging.
  * @param[in] input Saved prologue bytes.
  * @return Rejected, staged, or failed invariant result.
@@ -210,7 +397,7 @@ static RelocationCheckResult checkRelocationPipeline(const ReplayInput& input)
     constexpr ULONG_PTR kSourceAddress = 0x10000000;
     constexpr ULONG_PTR kTrampolineAddress = 0x10001000;
 
-    std::array<uint8_t, 32> output = {};
+    RelocationOutput output = {};
     DWORD instructionLength = 0;
     const MHOOK_STATUS status = stageHookCodeForTest(
         input.bytes.data(),
@@ -224,24 +411,10 @@ static RelocationCheckResult checkRelocationPipeline(const ReplayInput& input)
     if (status != MHOOK_STATUS_SUCCESS)
         return RelocationCheckResult::Rejected;
 
-    // JMP rel32 must return to the first instruction not copied.
-    constexpr uint8_t kJumpOpcode = 0xE9;
-    constexpr size_t kRelativeJumpSize = 5;
-    if (instructionLength + kRelativeJumpSize > output.size() || output[instructionLength] != kJumpOpcode)
+    // Accepted prologues must resume at the first source byte not copied.
+    if (!hasExpectedResumeJump(output, instructionLength, kSourceAddress, kTrampolineAddress))
     {
         fprintf(stderr, "relocation produced an invalid resume jump\n");
-        return RelocationCheckResult::Failed;
-    }
-
-    int32_t displacement = 0;
-    std::memcpy(&displacement, output.data() + instructionLength + 1, sizeof(displacement));
-
-    const int64_t resumeAddress =
-        static_cast<int64_t>(kTrampolineAddress + instructionLength + kRelativeJumpSize) + displacement;
-    const int64_t expectedAddress = static_cast<int64_t>(kSourceAddress + instructionLength);
-    if (resumeAddress != expectedAddress)
-    {
-        fprintf(stderr, "relocation produced resume address=%llx\n", static_cast<unsigned long long>(resumeAddress));
         return RelocationCheckResult::Failed;
     }
 
@@ -374,11 +547,16 @@ int main(int argumentCount, char* arguments[])
     }
 
 #ifdef _M_X64
-    if (caseRipRelativeLoadRelocation() != 0)
+    if (caseRipRelativeInstructionRelocation() != 0)
         return 1;
     if (caseRandomRipRelativeDisplacement(arguments[0]) != 0)
         return 1;
+#elif defined _M_IX86
+    if (caseX86WholeInstructionRelocation() != 0)
+        return 1;
 #endif
+    if (caseUnsupportedControlTransferRelocation() != 0)
+        return 1;
     if (caseRandomRelocationPipeline(arguments[0]) != 0)
         return 1;
 
